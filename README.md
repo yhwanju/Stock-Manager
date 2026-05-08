@@ -6,7 +6,7 @@
 
 - `main.py`: 시세 수집, 시장 상태 판단, 점수 계산, 리포트 생성, Discord 발송
 - `config.py`: 공통 설정, 시장 상태별 전략, 테마 키워드
-- `stocks.json`: 관심종목
+- `watchlist.json`: 관심종목
 - `holdings.json`: 보유종목
 - `news_summary.json`: 뉴스봇 연동 요약 파일
 - `.github/workflows/stock-manager.yml`: GitHub Actions 스케줄
@@ -36,7 +36,48 @@ pip install -r requirements.txt
 python main.py --dry-run
 ```
 
-`--dry-run`은 Discord 발송 없이 리포트만 출력합니다.
+`--dry-run`은 Discord 발송 없이 실제 전송될 메시지 1, 메시지 2를 콘솔에 각각 출력합니다.
+
+실제 발송은 아래처럼 실행합니다.
+
+```bash
+python main.py
+```
+
+## 관심종목
+
+관심종목은 `watchlist.json`에서 관리합니다.
+
+```json
+[
+  {
+    "name": "종목명",
+    "ticker": "000000.KS"
+  }
+]
+```
+
+한국 종목은 코스피 `.KS`, 코스닥 `.KQ` 티커를 사용합니다.
+
+## Discord 출력
+
+리포트는 Discord 모바일 가독성을 위해 2개 메시지로 나누어 발송합니다.
+
+- 메시지 1: 시장 상태, 오늘 액션, 강한 테마, 추천 종목 TOP3, 관심종목 점검
+- 메시지 2: 보유종목 관리, 수익률, 목표가, 손절가, 액션, 리스크 경고
+
+섹션 제목은 굵게 표시하고, 라벨은 일반 텍스트로 유지하며 값만 굵게 표시합니다.
+
+```text
+━━━━━━━━━━
+**🏆 추천 종목 TOP3**
+━━━━━━━━━━
+
+종목명: **LG에너지솔루션**
+퀀트 점수: **80**
+매매 타이밍 점수: **40**
+액션: **관망**
+```
 
 ## 뉴스봇 연동
 
@@ -76,7 +117,19 @@ python main.py --dry-run
 - 횡보장: 짧은 스윙 중심
 - 하락장: 현금 비중 50% 이상 권고
 
+## 실행 로그
+
+GitHub Actions 로그에는 아래 상태가 출력됩니다.
+
+- 리포트 생성 시작
+- `watchlist.json` 로드 성공/실패
+- `holdings.json` 로드 성공/실패
+- 추천/관심 메시지 Discord 발송 성공/실패
+- 보유종목 메시지 Discord 발송 성공/실패
+- 주말 또는 dry-run 스킵 사유
+
+`workflow_dispatch` 수동 실행은 주말이어도 발송합니다. KST 주말 스킵은 `schedule` 이벤트에서만 적용됩니다.
+
 ## 주의
 
 이 봇은 투자 판단 보조용입니다. 실제 매매 결정과 책임은 사용자에게 있습니다.
-

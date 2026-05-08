@@ -5,7 +5,7 @@ KST = ZoneInfo("Asia/Seoul")
 
 WEBHOOK_ENV_NAME = "DISCORD_STOCK_WEBHOOK_URL"
 
-STOCKS_FILE = "stocks.json"
+WATCHLIST_FILE = "watchlist.json"
 HOLDINGS_FILE = "holdings.json"
 NEWS_SUMMARY_FILE = "news_summary.json"
 
@@ -49,4 +49,3 @@ THEME_KEYWORDS = {
 }
 
 DISCORD_CONTENT_LIMIT = 1900
-

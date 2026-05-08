@@ -13,6 +13,8 @@ jobs:
   send-stock-report:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
@@ -27,8 +29,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Show run context
+        run: |
+          echo "GitHub event: $GITHUB_EVENT_NAME"
+          echo "Git ref: $GITHUB_REF"
+
       - name: Send stock report
         env:
           DISCORD_STOCK_WEBHOOK_URL: ${{ secrets.DISCORD_STOCK_WEBHOOK_URL }}
-        run: python main.py
-
+        run: python -u main.py

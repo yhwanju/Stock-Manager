@@ -25,13 +25,17 @@ from config import (
     MARKET_INDEXES,
     MARKET_STRATEGIES,
     NEWS_SUMMARY_FILE,
-    STOCKS_FILE,
     THEME_KEYWORDS,
+    WATCHLIST_FILE,
     WEBHOOK_ENV_NAME,
 )
 
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def log(message: str) -> None:
+    print(f"[stock-manager] {message}", flush=True)
 
 
 @dataclass
@@ -50,6 +54,7 @@ class StockAnalysis:
     stop_price: float | None = None
     target_price: float | None = None
     reason: str = "시세 데이터를 수집하지 못했습니다."
+    reason_bullets: list[str] = field(default_factory=list)
     error: str | None = None
     metrics: dict[str, float] = field(default_factory=dict)
 
@@ -66,16 +71,28 @@ class MarketSummary:
     reasons: list[str]
 
 
-def load_json_file(file_name: str, default: Any) -> Any:
+def describe_loaded_payload(payload: Any) -> str:
+    if isinstance(payload, list):
+        return f"{len(payload)}개 항목"
+    if isinstance(payload, dict):
+        return f"{len(payload)}개 키"
+    return type(payload).__name__
+
+
+def load_json_file(file_name: str, default: Any, *, required: bool = False) -> Any:
     path = BASE_DIR / file_name
     if not path.exists():
+        level = "필수" if required else "선택"
+        log(f"{file_name} 로드 실패: {level} 파일이 없습니다. 기본값으로 진행합니다.")
         return default
 
     try:
         with path.open("r", encoding="utf-8") as file:
-            return json.load(file)
+            payload = json.load(file)
+            log(f"{file_name} 로드 성공: {describe_loaded_payload(payload)}")
+            return payload
     except json.JSONDecodeError as exc:
-        print(f"{file_name} JSON 파싱 오류: {exc}")
+        log(f"{file_name} 로드 실패: JSON 파싱 오류 - {exc}. 기본값으로 진행합니다.")
         return default
 
 
@@ -163,32 +180,32 @@ def choose_final_action(analysis: StockAnalysis, market_state: str) -> str:
     timing = analysis.timing_score
 
     if analysis.error:
-        return "데이터 오류로 신규 매매 금지"
+        return "데이터 오류"
 
     if market_state == "하락장":
         if score >= 85 and timing >= 75:
-            return "소액 분할매수 후보"
-        return "관망 / 현금 확보"
+            return "소액분할매수"
+        return "관망"
 
     if market_state == "변동성 확대장":
         if quant >= 78 and timing >= 72:
-            return "선별 분할매수"
+            return "선별매수"
         return "관망"
 
     if market_state == "횡보장":
         if score >= 75 and timing >= 70:
-            return "짧은 스윙 매수 후보"
+            return "짧은스윙"
         if score >= 60:
-            return "관망 후 눌림 대기"
-        return "매매 금지"
+            return "눌림대기"
+        return "매매금지"
 
     if score >= 80 and timing >= 70:
-        return "매수 가능"
+        return "매수가능"
     if score >= 65:
-        return "분할매수 검토"
+        return "분할매수"
     if score >= 50:
         return "관망"
-    return "매매 금지"
+    return "매매금지"
 
 
 def describe_current_state(
@@ -210,24 +227,41 @@ def describe_current_state(
     return "중립"
 
 
-def build_reason(
+def build_reason_bullets(
     analysis: StockAnalysis,
     ma20: float,
     ma60: float,
     rsi: float,
     volume_ratio: float,
     theme_bonus: int,
-) -> str:
-    parts = [
-        f"20일선 대비 {format_pct(analysis.metrics.get('price_vs_ma20'))}",
-        f"RSI {rsi:.1f}",
-        f"거래량 {volume_ratio:.1f}배",
-    ]
+) -> list[str]:
+    parts: list[str] = []
+
     if analysis.current_price and analysis.current_price > ma20 > ma60:
         parts.append("중기 추세 우위")
+    elif analysis.current_price and analysis.current_price < ma20:
+        parts.append("20일선 하회")
+    else:
+        parts.append("20일선 근처")
+
     if theme_bonus:
         parts.append("뉴스 테마 가점")
-    return ", ".join(parts)
+
+    if 1.2 <= volume_ratio <= 3:
+        parts.append("거래량 양호")
+    elif volume_ratio > 3:
+        parts.append("거래량 과열")
+    else:
+        parts.append("거래량 보통")
+
+    if 45 <= rsi <= 65:
+        parts.append("RSI 중립")
+    elif rsi > 70:
+        parts.append("단기 과열")
+    elif rsi < 35:
+        parts.append("단기 침체")
+
+    return parts[:4]
 
 
 def analyze_stock(stock: dict[str, Any], strong_themes: list[str], market_state: str) -> StockAnalysis:
@@ -312,12 +346,14 @@ def analyze_stock(stock: dict[str, Any], strong_themes: list[str], market_state:
             "price_vs_ma20": price_vs_ma20,
         }
         analysis.final_action = choose_final_action(analysis, market_state)
-        analysis.reason = build_reason(analysis, ma20, ma60, rsi, volume_ratio, theme_bonus)
+        analysis.reason_bullets = build_reason_bullets(analysis, ma20, ma60, rsi, volume_ratio, theme_bonus)
+        analysis.reason = " / ".join(analysis.reason_bullets)
         return analysis
     except Exception as exc:
         analysis.error = str(exc)
         analysis.reason = f"데이터 수집 실패: {exc}"
-        analysis.final_action = "데이터 오류로 신규 매매 금지"
+        analysis.reason_bullets = ["데이터 수집 실패"]
+        analysis.final_action = "데이터 오류"
         return analysis
 
 
@@ -438,7 +474,7 @@ def extract_themes_from_news(news_summary: dict[str, Any]) -> tuple[list[str], s
 
 def holding_action(analysis: StockAnalysis, quantity: int, average_price: float, market_state: str) -> tuple[str, float | None, float | None]:
     if analysis.error or analysis.current_price is None:
-        return "데이터 오류로 보유 판단 보류", None, None
+        return "데이터 오류", None, None
 
     current_price = analysis.current_price
     profit_pct = ((current_price / average_price) - 1) * 100
@@ -449,11 +485,11 @@ def holding_action(analysis: StockAnalysis, quantity: int, average_price: float,
     target_price = max(average_price * 1.15, current_price * 1.08)
 
     if current_price <= stop_price or profit_pct <= -8:
-        action = "손절 기준 점검"
+        action = "손절주의"
     elif profit_pct >= 15:
-        action = "분할 익절"
+        action = "일부익절"
     elif market_state == "하락장" and profit_pct < 0:
-        action = "비중 축소 / 현금 확보"
+        action = "비중축소"
     elif analysis.timing_score >= 70 and analysis.quant_score >= 65:
         action = "보유"
     else:
@@ -463,6 +499,64 @@ def holding_action(analysis: StockAnalysis, quantity: int, average_price: float,
     return action, stop_price, target_price
 
 
+def bold(value: Any) -> str:
+    return f"**{value}**"
+
+
+def section(title: str) -> list[str]:
+    return [
+        "━━━━━━━━━━",
+        f"**{title}**",
+        "━━━━━━━━━━",
+        "",
+    ]
+
+
+def summarize_holding_action(holdings: list[dict[str, Any]], holding_analyses: dict[str, StockAnalysis], market_state: str) -> str:
+    actions: list[str] = []
+    for holding in holdings:
+        analysis = holding_analyses.get(holding["ticker"])
+        if not analysis:
+            continue
+        action, _, _ = holding_action(
+            analysis,
+            int(holding["quantity"]),
+            float(holding["average_price"]),
+            market_state,
+        )
+        actions.append(action)
+
+    if any(action in {"손절주의", "비중축소"} for action in actions):
+        return "리스크관리"
+    if any(action == "일부익절" for action in actions):
+        return "일부익절"
+    if any(action == "보유" for action in actions):
+        return "보유"
+    return "관망"
+
+
+def append_price_block(lines: list[str], label: str, value: float | int | None) -> None:
+    lines.append(f"{label}:")
+    lines.append(bold(format_krw(value)))
+    lines.append("")
+
+
+def append_risk_block(lines: list[str], action: str, market_state: str) -> None:
+    lines.append("리스크:")
+    if action == "손절주의":
+        lines.append("- 손절가 이탈 시 추세 훼손")
+    else:
+        lines.append("- 손절가 이탈 시 추세 훼손")
+
+    if market_state == "변동성 확대장":
+        lines.append("- 시장 변동성 확대 시 비중 축소 검토")
+    elif market_state == "하락장":
+        lines.append("- 하락장에서는 현금 비중 50% 이상 유지")
+    else:
+        lines.append("- 시장 변동성 확대 시 비중 축소 검토")
+    lines.append("")
+
+
 def make_report(
     market: MarketSummary,
     strong_themes: list[str],
@@ -470,7 +564,7 @@ def make_report(
     watchlist: list[StockAnalysis],
     holdings: list[dict[str, Any]],
     holding_analyses: dict[str, StockAnalysis],
-) -> str:
+) -> list[str]:
     now = datetime.now(KST)
     recommendation_pool = [item for item in watchlist if not item.error]
     recommendations = sorted(
@@ -478,48 +572,71 @@ def make_report(
         key=lambda item: (item.composite_score, item.timing_score, item.quant_score),
         reverse=True,
     )[:3]
+    new_entry_action = "관망"
+    if recommendations and recommendations[0].final_action in {"매수가능", "분할매수", "선별매수", "소액분할매수"}:
+        new_entry_action = recommendations[0].final_action
+    holding_summary_action = summarize_holding_action(holdings, holding_analyses, market.state)
 
-    lines: list[str] = []
-    lines.append("[주식관리 리포트]")
-    lines.append(f"발송일: {now:%Y-%m-%d %H:%M} KST")
-    lines.append(f"시장 상태: {market.state} ({market.strategy})")
-    lines.append(f"현금 비중 권고: {market.cash_recommendation}")
-    lines.append(f"시장 판단 근거: {' / '.join(market.reasons)}")
-    lines.append("")
+    message1: list[str] = []
+    message1.append("📊 **주식관리 리포트**")
+    message1.append(f"발송일: {bold(f'{now:%Y-%m-%d %H:%M} KST')}")
+    message1.append("")
 
-    lines.append("[오늘 강한 테마]")
+    message1.extend(section("🌎 시장 상태"))
+    message1.append(f"시장 상태: {bold(market.state)}")
+    message1.append(f"현금 비중 권고: {bold(market.cash_recommendation)}")
+    message1.append("")
+
+    message1.extend(section("⚡ 오늘 액션 요약"))
+    message1.append(f"* 신규진입: {bold(new_entry_action)}")
+    message1.append(f"* 보유종목: {bold(holding_summary_action)}")
+    message1.append(f"* 매매원칙: {bold('추격매수 금지')}")
+    message1.append("")
+
+    message1.extend(section("🔥 오늘 강한 테마"))
     for index, theme in enumerate(strong_themes[:3], start=1):
-        lines.append(f"{index}. {theme}")
-    lines.append(f"참고: {theme_note}")
-    lines.append("")
+        message1.append(f"{index}. {bold(theme)}")
+    message1.append("")
 
-    lines.append("[추천 종목 TOP 3]")
+    message1.extend(section("🏆 추천 종목 TOP3"))
     if recommendations:
         for item in recommendations:
-            lines.append(f"종목명: {item.name} ({item.ticker})")
-            lines.append(f"퀀트 점수: {item.quant_score}")
-            lines.append(f"매매 타이밍 점수: {item.timing_score}")
-            lines.append(f"최종 액션: {item.final_action}")
-            lines.append(f"진입 가능 구간: {item.entry_zone}")
-            lines.append(f"손절 구간: {format_krw(item.stop_price)}")
-            lines.append(f"목표가: {format_krw(item.target_price)}")
-            lines.append(f"근거: {item.reason}")
-            lines.append("")
+            message1.append(f"종목명: {bold(item.name)}")
+            message1.append(f"퀀트 점수: {bold(item.quant_score)}")
+            message1.append(f"매매 타이밍 점수: {bold(item.timing_score)}")
+            message1.append(f"액션: {bold(item.final_action)}")
+            message1.append("")
+            message1.append("진입 가능 구간:")
+            message1.append(item.entry_zone)
+            message1.append("")
+            append_price_block(message1, "손절가", item.stop_price)
+            append_price_block(message1, "목표가", item.target_price)
+            message1.append("근거:")
+            message1.append("")
+            for reason in item.reason_bullets:
+                message1.append(f"* {reason}")
+            message1.append("")
     else:
-        lines.append("추천 가능 종목 없음: 관심종목 시세 수집 실패")
-        lines.append("")
+        message1.append("추천 가능 종목 없음")
+        message1.append("")
 
-    lines.append("[관심종목 점검]")
+    message1.extend(section("👀 관심종목 점검"))
     for item in watchlist:
-        lines.append(f"종목명: {item.name} ({item.ticker})")
-        lines.append(f"현재 상태: {item.current_state}")
-        lines.append(f"액션: {item.final_action}")
+        message1.append(f"종목명: {bold(item.name)}")
+        message1.append(f"상태: {bold(item.current_state)}")
+        message1.append(f"액션: {bold(item.final_action)}")
         if item.error:
-            lines.append(f"오류: {item.error}")
-        lines.append("")
+            message1.append(f"오류: {item.error}")
+        message1.append("")
 
-    lines.append("[보유종목 관리]")
-    action_summaries: list[str] = []
+    message2: list[str] = []
+    message2.append("💼 **보유종목 관리**")
+    message2.append("")
+    message2.extend(section("💼 보유종목 관리"))
+    if not holdings:
+        message2.append("보유종목 없음")
+        message2.append("")
+
     for holding in holdings:
         ticker = holding["ticker"]
         analysis = holding_analyses[ticker]
@@ -530,31 +647,26 @@ def make_report(
         if analysis.current_price:
             profit_pct = ((analysis.current_price / average_price) - 1) * 100
 
-        lines.append(f"종목명: {holding['name']} ({ticker})")
-        lines.append(f"보유수량: {quantity:,}주")
-        lines.append(f"평단: {format_krw(average_price)}")
-        lines.append(f"현재가: {format_krw(analysis.current_price)}")
-        lines.append(f"수익률: {format_pct(profit_pct)}")
-        lines.append(f"손절가: {format_krw(stop_price)}")
-        lines.append(f"목표가: {format_krw(target_price)}")
-        lines.append(f"액션: {action}")
-        action_summaries.append(f"- {holding['name']}: {action}")
+        message2.append(f"종목명: {bold(holding['name'])}")
+        message2.append(f"보유수량: {bold(f'{quantity:,}주')}")
+        message2.append(f"평단: {bold(format_krw(average_price))}")
+        message2.append(f"현재가: {bold(format_krw(analysis.current_price))}")
+        message2.append(f"수익률: {bold(format_pct(profit_pct))}")
+        message2.append(f"액션: {bold(action)}")
+        message2.append("")
+        append_price_block(message2, "목표가", target_price)
+        append_price_block(message2, "손절가", stop_price)
+        append_risk_block(message2, action, market.state)
         if analysis.error:
-            lines.append(f"오류: {analysis.error}")
-        lines.append("")
+            message2.append(f"오류: {analysis.error}")
+            message2.append("")
 
-    lines.append("[손절/익절/관망 액션]")
-    lines.extend(action_summaries or ["- 점검 가능한 보유종목 없음"])
-    lines.append("")
+    message2.extend(section("⚠️ 리스크 경고"))
+    message2.append("* 추격매수 금지")
+    message2.append("* 손절가 이탈 종목 물타기 금지")
+    message2.append("* 시장 변동성 확대 시 비중 축소 검토")
 
-    lines.append("[오늘의 매매 금지 조건]")
-    lines.append("- 추격매수 금지")
-    lines.append("- 하락장에서는 현금 50% 이상")
-    lines.append("- 변동성 확대장에서는 확실한 종목만 매매")
-    lines.append("- 손절가 이탈 종목 물타기 금지")
-    lines.append("- 데이터 오류 종목은 신규 매수 금지")
-
-    return "\n".join(lines)
+    return ["\n".join(message1).strip(), "\n".join(message2).strip()]
 
 
 def split_discord_message(report: str, limit: int = DISCORD_CONTENT_LIMIT) -> list[str]:
@@ -593,9 +705,12 @@ def split_discord_message(report: str, limit: int = DISCORD_CONTENT_LIMIT) -> li
     return [f"[{index}/{len(chunks)}]\n{chunk}" for index, chunk in enumerate(chunks, start=1)]
 
 
-def send_to_discord(report: str, webhook_url: str) -> None:
-    chunks = split_discord_message(report)
-    for chunk in chunks:
+def send_discord_message(message_name: str, content: str, webhook_url: str) -> None:
+    chunks = split_discord_message(content)
+    if len(chunks) > 1:
+        log(f"{message_name} 메시지가 길어 {len(chunks)}개로 나누어 전송합니다.")
+
+    for index, chunk in enumerate(chunks, start=1):
         response = requests.post(
             webhook_url,
             json={
@@ -605,25 +720,44 @@ def send_to_discord(report: str, webhook_url: str) -> None:
             timeout=20,
         )
         if response.status_code >= 400:
-            raise RuntimeError(f"Discord 전송 실패: HTTP {response.status_code} {response.text}")
+            log(f"{message_name} Discord 발송 실패: HTTP {response.status_code} {response.text}")
+            raise RuntimeError(f"{message_name} Discord 발송 실패")
+
+        part = f" ({index}/{len(chunks)})" if len(chunks) > 1 else ""
+        log(f"{message_name} Discord 발송 성공{part}: {len(chunk)}자")
 
 
-def build_report_from_files() -> str:
-    stocks = load_json_file(STOCKS_FILE, [])
-    holdings = load_json_file(HOLDINGS_FILE, [])
+def send_to_discord(reports: list[str], webhook_url: str) -> None:
+    if len(reports) != 2:
+        raise ValueError(f"Discord 메시지는 2개여야 합니다. 현재 {len(reports)}개입니다.")
+
+    send_discord_message("메시지1", reports[0], webhook_url)
+    send_discord_message("메시지2", reports[1], webhook_url)
+
+
+def build_report_from_files() -> list[str]:
+    log("리포트 생성 시작")
+    watchlist_items = load_json_file(WATCHLIST_FILE, [], required=True)
+    holdings = load_json_file(HOLDINGS_FILE, [], required=True)
     news_summary = load_json_file(NEWS_SUMMARY_FILE, {})
 
     market = analyze_market()
+    log(f"시장 상태 판단 완료: {market.state}")
     strong_themes, theme_note = extract_themes_from_news(news_summary)
+    log(f"강한 테마 선정 완료: {', '.join(strong_themes[:3])}")
 
-    watchlist = [analyze_stock(stock, strong_themes, market.state) for stock in stocks]
+    watchlist = [analyze_stock(stock, strong_themes, market.state) for stock in watchlist_items]
+    watchlist_errors = [item for item in watchlist if item.error]
+    log(f"관심종목 분석 완료: 성공 {len(watchlist) - len(watchlist_errors)}개, 오류 {len(watchlist_errors)}개")
 
     holding_analyses = {
         holding["ticker"]: analyze_stock(holding, strong_themes, market.state)
         for holding in holdings
     }
+    holding_errors = [item for item in holding_analyses.values() if item.error]
+    log(f"보유종목 분석 완료: 성공 {len(holding_analyses) - len(holding_errors)}개, 오류 {len(holding_errors)}개")
 
-    return make_report(
+    reports = make_report(
         market=market,
         strong_themes=strong_themes,
         theme_note=theme_note,
@@ -631,10 +765,18 @@ def build_report_from_files() -> str:
         holdings=holdings,
         holding_analyses=holding_analyses,
     )
+    log(f"리포트 생성 완료: 메시지1 {len(reports[0])}자, 메시지2 {len(reports[1])}자")
+    return reports
 
 
 def is_weekend_kst(now: datetime) -> bool:
     return now.weekday() >= 5
+
+
+def should_skip_for_weekend(now: datetime, event_name: str, force_weekend: bool) -> bool:
+    if force_weekend:
+        return False
+    return event_name == "schedule" and is_weekend_kst(now)
 
 
 def main() -> int:
@@ -645,24 +787,37 @@ def main() -> int:
 
     now = datetime.now(KST)
     dry_run = args.dry_run or os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes"}
+    event_name = os.getenv("GITHUB_EVENT_NAME", "local")
 
-    if is_weekend_kst(now) and not args.force_weekend:
-        print(f"{now:%Y-%m-%d} KST는 주말입니다. 리포트 발송을 건너뜁니다.")
+    log(f"실행 이벤트: {event_name}")
+    log(f"현재 시각: {now:%Y-%m-%d %H:%M:%S} KST")
+
+    if should_skip_for_weekend(now, event_name, args.force_weekend):
+        log(f"발송 스킵: schedule 실행이고 {now:%Y-%m-%d} KST가 주말입니다.")
         return 0
+    if event_name == "workflow_dispatch":
+        log("workflow_dispatch 수동 실행: 주말 체크를 건너뛰고 발송을 진행합니다.")
+    elif args.force_weekend:
+        log("--force-weekend 옵션 사용: 주말 체크를 건너뛰고 진행합니다.")
 
-    report = build_report_from_files()
-    print(report)
+    reports = build_report_from_files()
 
     if dry_run:
-        print("\nDRY_RUN 모드이므로 Discord 전송을 건너뜁니다.")
+        log("발송 스킵: DRY_RUN 모드입니다.")
+        print("\n===== 메시지 1: 시장/추천/관심종목 =====\n", flush=True)
+        print(reports[0], flush=True)
+        print("\n===== 메시지 2: 보유종목 관리 =====\n", flush=True)
+        print(reports[1], flush=True)
         return 0
 
     webhook_url = os.getenv(WEBHOOK_ENV_NAME)
     if not webhook_url:
+        log(f"Discord 발송 실패: {WEBHOOK_ENV_NAME} 환경 변수가 설정되어 있지 않습니다.")
         raise RuntimeError(f"{WEBHOOK_ENV_NAME} 환경 변수가 설정되어 있지 않습니다.")
 
-    send_to_discord(report, webhook_url)
-    print("Discord 전송 완료")
+    log("Discord 발송 시작")
+    send_to_discord(reports, webhook_url)
+    log("Discord 전송 완료")
     return 0
 
 
