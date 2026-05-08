@@ -1,0 +1,21 @@
+[
+  {
+    "name": "한중엔시에스",
+    "ticker": "107640.KQ",
+    "market": "KOSDAQ",
+    "themes": ["2차전지", "ESS", "에너지저장장치"]
+  },
+  {
+    "name": "LG에너지솔루션",
+    "ticker": "373220.KS",
+    "market": "KOSPI",
+    "themes": ["2차전지", "배터리", "전기차"]
+  },
+  {
+    "name": "두산",
+    "ticker": "000150.KS",
+    "market": "KOSPI",
+    "themes": ["지주사", "로봇", "전력기기"]
+  }
+]
+

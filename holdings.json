@@ -1,0 +1,27 @@
+[
+  {
+    "name": "CJ씨푸드",
+    "ticker": "011150.KS",
+    "market": "KOSPI",
+    "quantity": 1300,
+    "average_price": 2663,
+    "themes": ["음식료/수산", "수산", "가공식품"]
+  },
+  {
+    "name": "티에이치엔",
+    "ticker": "019180.KS",
+    "market": "KOSPI",
+    "quantity": 300,
+    "average_price": 7593,
+    "themes": ["자동차부품", "전장"]
+  },
+  {
+    "name": "HK이노엔",
+    "ticker": "195940.KQ",
+    "market": "KOSDAQ",
+    "quantity": 50,
+    "average_price": 49500,
+    "themes": ["바이오/제약", "제약", "헬스케어"]
+  }
+]
+
