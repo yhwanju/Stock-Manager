@@ -5,9 +5,14 @@
 ## 구성
 
 - `main.py`: 시세 수집, 시장 상태 판단, 점수 계산, 리포트 생성, Discord 발송
+- `discord_bot.py`: Discord slash command 질문봇 실행
+- `bot_commands.py`: 질문봇 명령어 처리
+- `analyzer.py`: 정기 리포트와 질문봇이 공유하는 분석 로직
+- `storage.py`: `watchlist.json`, `holdings.json`, `news_summary.json`, `alerts.json` 읽기/쓰기
 - `config.py`: 공통 설정, 시장 상태별 전략, 테마 키워드
 - `watchlist.json`: 관심종목
 - `holdings.json`: 보유종목
+- `alerts.json`: 목표가/손절가 알림 조건
 - `news_summary.json`: 뉴스봇 연동 요약 파일
 - `.github/workflows/stock-manager.yml`: GitHub Actions 스케줄
 
@@ -43,6 +48,44 @@ python main.py --dry-run
 ```bash
 python main.py
 ```
+
+## Discord 질문봇
+
+질문봇은 slash command를 받기 위해 계속 실행 중이어야 합니다. GitHub Actions는 예약 실행에는 적합하지만 상시 실행 봇 호스팅에는 적합하지 않습니다. 로컬 PC, 개인 서버, NAS, Railway, Render 같은 상시 실행 환경에서 `discord_bot.py`를 실행하세요.
+
+필수 환경변수:
+
+```text
+DISCORD_BOT_TOKEN
+```
+
+테스트 서버에 명령어를 빠르게 등록하려면 선택 환경변수 `DISCORD_GUILD_ID`를 설정할 수 있습니다. 설정하지 않으면 global command로 동기화되며 Discord 반영에 시간이 걸릴 수 있습니다.
+
+실행:
+
+```bash
+pip install -r requirements.txt
+python discord_bot.py
+```
+
+지원 명령어:
+
+- `/기능`: 전체 명령어 목록
+- `/종목분석 종목명`: 종목 상세 분석
+- `/강한테마종목`: 강한 테마 기준 추천종목 3개 이름만 출력
+- `/관심추가 종목명 티커`: 관심종목 추가
+- `/관심삭제 종목명`: 관심종목 삭제
+- `/관심목록`: 관심종목 목록
+- `/보유추가 종목명 티커 수량 평단`: 보유종목 추가/업데이트
+- `/보유삭제 종목명`: 보유종목 삭제
+- `/보유목록`: 보유종목 목록
+- `/포트폴리오점검`: 비중, 수익률, 테마 편중, 리스크 점검
+- `/시장상태`: 시장 상태와 현금 비중 전략
+- `/오늘전략`: 신규매수/관망/현금비중 전략
+- `/강한테마`: 뉴스봇 기반 강한 테마
+- `/물림 종목명 평단`: 손절가, 버틸 구간, 시간손절 기준
+- `/테마점검 테마명`: 테마 지속성, 과열도, 리스크
+- `/알림설정 종목명 조건 가격`: 목표가/손절가 알림 조건 저장
 
 ## 관심종목
 

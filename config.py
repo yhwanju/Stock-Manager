@@ -4,10 +4,12 @@ from zoneinfo import ZoneInfo
 KST = ZoneInfo("Asia/Seoul")
 
 WEBHOOK_ENV_NAME = "DISCORD_STOCK_WEBHOOK_URL"
+BOT_TOKEN_ENV_NAME = "DISCORD_BOT_TOKEN"
 
 WATCHLIST_FILE = "watchlist.json"
 HOLDINGS_FILE = "holdings.json"
 NEWS_SUMMARY_FILE = "news_summary.json"
+ALERTS_FILE = "alerts.json"
 
 HISTORY_PERIOD = "6mo"
 HISTORY_INTERVAL = "1d"
