@@ -427,8 +427,8 @@ def add_holding(name: str, quantity: int, average_price: float) -> str:
     if not verified:
         return _holding_save_failed_message(
             display_name,
-            "저장 검증 실패",
-            "보유 데이터에 저장 직후 다시 조회했지만 종목을 찾지 못했습니다.",
+            "저장 실패",
+            f"보유 데이터에 저장 직후 다시 조회했지만 종목을 찾지 못했습니다.\n저장 경로: **{storage.storage_location_text(storage.HOLDINGS_FILE)}**",
         )
 
     old_quantity = int(before.get("quantity", 0)) if before else 0
@@ -446,10 +446,12 @@ def add_holding(name: str, quantity: int, average_price: float) -> str:
         memo="추가매수" if before else "신규매수",
     )
     if not _record_trade_with_verification(trade):
-        return _holding_save_failed_message(display_name, "매매이력 저장 검증 실패", "매매이력에 BUY 이력을 저장했지만 다시 조회하지 못했습니다.")
+        return _holding_save_failed_message(display_name, "저장 실패", "매매이력에 BUY 이력을 저장했지만 다시 조회하지 못했습니다.")
 
     removed = storage.delete_watchlist(ticker) or storage.delete_watchlist(display_name) or storage.delete_watchlist(name)
     watchlist_status = "자동 제외 완료" if removed else "제외 대상 없음"
+    holdings_after = storage.load_holdings(logger=command_log)
+    command_log(f"/보유추가 저장 최종 확인: holdings {len(holdings_after)}개 / 경로: {storage.storage_location_text(storage.HOLDINGS_FILE)}")
 
     if status == "additional_buy":
         return (
@@ -464,7 +466,7 @@ def add_holding(name: str, quantity: int, average_price: float) -> str:
             f"{_format_quantity_price(current_quantity, current_average_price, ticker)}"
         )
 
-    return _format_holding_result("신규 보유종목 추가 완료", verified or item, bool(removed))
+    return _format_holding_result("보유종목 추가 완료", verified or item, bool(removed))
 
 
 def buy_watchlist(name: str, quantity: int, average_price: float) -> str:

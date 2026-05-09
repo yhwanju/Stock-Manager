@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Callable
@@ -18,8 +19,8 @@ from config import (
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-DATA_DIR = PROJECT_ROOT / "data"
+PROJECT_ROOT = Path(__file__).resolve(strict=True).parent
+DATA_DIR = (PROJECT_ROOT / "data").resolve()
 BASE_DIR = DATA_DIR
 Logger = Callable[[str], None] | None
 DATA_FILES = {
@@ -46,8 +47,8 @@ def log(logger: Logger, message: str) -> None:
 
 def json_file_path(file_name: str) -> Path:
     if file_name in DATA_FILES:
-        return DATA_DIR / file_name
-    return PROJECT_ROOT / file_name
+        return (DATA_DIR / file_name).resolve()
+    return (PROJECT_ROOT / file_name).resolve()
 
 
 def json_file_path_text(file_name: str) -> str:
@@ -59,7 +60,7 @@ def storage_location_text(file_name: str) -> str:
 
 
 def legacy_json_file_path(file_name: str) -> Path:
-    return PROJECT_ROOT / file_name
+    return (PROJECT_ROOT / file_name).resolve()
 
 
 def backup_file_path(file_name: str) -> Path:
@@ -74,6 +75,7 @@ def _load_json_from_path(path: Path) -> Any:
 
 def _load_local_json_file(file_name: str, default: Any, *, required: bool = False, logger: Logger = None) -> Any:
     path = json_file_path(file_name)
+    log(logger, f"{file_name} 읽기 파일 경로: {path}")
     if not path.exists():
         legacy_path = legacy_json_file_path(file_name)
         if file_name in DATA_FILES and legacy_path.exists():
@@ -105,6 +107,7 @@ def load_json_file(file_name: str, default: Any, *, required: bool = False, logg
 
 def save_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
     path = json_file_path(file_name)
+    log(logger, f"{file_name} 저장 파일 경로: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         backup_path = backup_file_path(file_name)
@@ -115,6 +118,8 @@ def save_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
     with temp_path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
         file.write("\n")
+        file.flush()
+        os.fsync(file.fileno())
     temp_path.replace(path)
 
     verified_payload = _load_json_from_path(path)
@@ -141,15 +146,26 @@ def save_watchlist(items: list[dict[str, Any]], logger: Logger = None) -> None:
 
 
 def load_holdings(logger: Logger = None) -> list[dict[str, Any]]:
+    log(logger, f"holdings 읽기 경로 확인: {storage_location_text(HOLDINGS_FILE)}")
     payload = load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
     if not isinstance(payload, list):
         log(logger, f"{HOLDINGS_FILE} 로드 실패: 목록 형식이 아닙니다. 저장소: {storage_location_text(HOLDINGS_FILE)}")
         return []
+    log(logger, f"holdings 읽기 완료: {len(payload)}개 / 경로: {storage_location_text(HOLDINGS_FILE)}")
     return payload
 
 
 def save_holdings(items: list[dict[str, Any]], logger: Logger = None) -> None:
+    path = json_file_path(HOLDINGS_FILE)
+    log(logger, f"holdings 저장 시작: {len(items)}개 / 경로: {path}")
     save_json_file(HOLDINGS_FILE, items, logger=logger)
+    verified = load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
+    if not isinstance(verified, list):
+        raise IOError(f"holdings 저장 검증 실패: 다시 읽은 데이터가 목록 형식이 아닙니다. 경로: {path}")
+    log(logger, f"holdings 저장 후 재읽기 완료: {len(verified)}개 / 경로: {path}")
+    if verified != items:
+        raise IOError(f"holdings 저장 검증 실패: 저장 요청 데이터와 재읽기 데이터가 다릅니다. 경로: {path}")
+    log(logger, f"holdings 저장 검증 성공: {len(verified)}개 / 경로: {path}")
 
 
 def load_trade_history(logger: Logger = None) -> list[dict[str, Any]]:
