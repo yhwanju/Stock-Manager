@@ -1299,10 +1299,13 @@ def record_recommendation_history(
                     "date": f"{now:%Y-%m-%d %H:%M:%S} KST",
                     "name": item.name,
                     "ticker": item.ticker,
+                    "price": item.current_price,
                     "action": item.final_action,
                     "quant_score": item.quant_score,
                     "timing_score": item.timing_score,
                     "market_state": market.state,
+                    "target_price": item.target_price,
+                    "stop_price": item.stop_price,
                     "themes": item.themes,
                     "memo": "daily_report_top3",
                 }

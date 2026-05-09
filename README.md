@@ -8,17 +8,16 @@
 - `discord_bot.py`: Discord slash command 질문봇 실행
 - `bot_commands.py`: 질문봇 명령어 처리
 - `analyzer.py`: 정기 리포트와 질문봇이 공유하는 분석 로직
-- `storage.py`: Google Sheets 우선 저장소 라우팅, 로컬 JSON 캐시/fallback 읽기/쓰기
-- `sheets_storage.py`: Google Sheets `watchlist`, `holdings`, `trade_history`, `recommendation_history` 읽기/쓰기
+- `storage.py`: `data/` 폴더 기준 로컬 JSON 읽기/쓰기, 백업 생성, 저장 검증
 - `config.py`: 공통 설정, 시장 상태별 전략, 테마 키워드
 - `theme_config.json`: 우선 분석 대분류 테마와 세부 태그, 대표종목
 - `ticker_map.json`: 종목명과 티커 자동 매핑
 - `theme_map.json`: 종목명과 테마/세부태그 자동 매핑
-- `watchlist.json`: 관심종목 로컬 캐시/fallback
-- `holdings.json`: 보유종목 로컬 캐시/fallback
-- `trade_history.json`: 매매이력 로컬 캐시/fallback
-- `recommendation_history.json`: 추천이력 로컬 캐시/fallback
-- `alerts.json`: 목표가/손절가 알림 조건
+- `data/watchlist.json`: 관심종목
+- `data/holdings.json`: 보유종목
+- `data/trade_history.json`: 매매이력
+- `data/recommendation_history.json`: 추천이력
+- `data/alerts.json`: 목표가/손절가 알림 조건
 - `news_summary.json`: 뉴스봇 연동 요약 파일
 - `.github/workflows/stock-manager.yml`: GitHub Actions 스케줄
 
@@ -57,7 +56,7 @@ python main.py
 
 ## Discord 질문봇
 
-질문봇은 slash command를 받기 위해 계속 실행 중이어야 합니다. GitHub Actions는 예약 실행에는 적합하지만 상시 실행 봇 호스팅에는 적합하지 않습니다. 로컬 PC, 개인 서버, NAS, Railway, Render 같은 상시 실행 환경에서 `discord_bot.py`를 실행하세요.
+질문봇은 slash command를 받기 위해 계속 실행 중이어야 합니다. Termux 태블릿 단독 운영 기준에서는 이 저장소를 태블릿에 내려받고 `discord_bot.py`를 계속 실행하면 됩니다.
 
 필수 환경변수:
 
@@ -65,78 +64,58 @@ python main.py
 DISCORD_BOT_TOKEN
 ```
 
-테스트 서버에 명령어를 빠르게 등록하려면 선택 환경변수 `DISCORD_GUILD_ID`를 설정할 수 있습니다. 설정하지 않으면 global command로 동기화되며 Discord 반영에 시간이 걸릴 수 있습니다.
+선택 환경변수:
 
-실행:
+```text
+DISCORD_GUILD_ID
+```
+
+테스트 서버에 명령어를 빠르게 등록하려면 `DISCORD_GUILD_ID`를 설정할 수 있습니다. 설정하지 않으면 global command로 동기화되며 Discord 반영에 시간이 걸릴 수 있습니다.
+
+Termux 실행:
 
 ```bash
+pkg update
+pkg install python git
+git clone https://github.com/yhwanju/Stock-Manager.git
+cd Stock-Manager
+git checkout codex/stock-manager-bot
 pip install -r requirements.txt
+export DISCORD_BOT_TOKEN="Discord 봇 토큰"
+export DISCORD_GUILD_ID="테스트 서버 ID 선택"
 python discord_bot.py
 ```
 
-### Render 무료 Web Service 배포
+장시간 켜둘 때는 Termux가 절전으로 멈추지 않도록 아래 명령을 함께 사용할 수 있습니다.
 
-Render 무료 플랜에서는 Background Worker 대신 Web Service로 질문봇을 실행할 수 있습니다. `discord_bot.py`는 Discord 봇과 함께 Flask health check 서버를 별도 스레드로 실행해 Render가 열린 포트를 감지할 수 있게 합니다.
-
-Health check:
-
-```text
-GET /
-Bot is running
+```bash
+termux-wake-lock
 ```
 
-Render 설정:
+### 로컬 JSON 저장소
+
+Termux 태블릿 단독 운영 기준으로 봇 데이터는 모두 `data/` 폴더의 로컬 JSON에 저장합니다. Google Sheets 연동은 사용하지 않습니다.
+
+- `data/watchlist.json`: 관심종목
+- `data/holdings.json`: 보유종목
+- `data/trade_history.json`: 매매이력
+- `data/recommendation_history.json`: 추천이력과 성과 추적 기준 데이터
+- `data/alerts.json`: 목표가/손절가 알림 조건
+
+저장할 때는 기존 파일을 같은 폴더의 `.bak` 파일로 먼저 백업하고, 저장 후 다시 읽어서 검증합니다. 검증에 실패하면 성공 메시지를 출력하지 않습니다.
 
 ```text
-Build Command: pip install -r requirements.txt
-Start Command: python discord_bot.py
+data/holdings.json
+data/holdings.json.bak
 ```
 
-저장소에는 `render.yaml`도 포함되어 있어 Render Blueprint로 바로 적용할 수 있습니다. Render에서 New Blueprint를 선택하고 이 저장소를 연결한 뒤, 아래 환경변수만 직접 입력하면 됩니다.
-
-Environment Variables:
-
-```text
-DISCORD_BOT_TOKEN=Discord 봇 토큰
-DISCORD_GUILD_ID=테스트 서버 ID 선택
-GOOGLE_SERVICE_ACCOUNT_JSON=Google 서비스 계정 JSON 전체 문자열
-GOOGLE_SHEETS_SPREADSHEET_ID=Google Sheets 스프레드시트 ID
-PORT=Render가 자동 설정
-```
-
-`PORT`가 없으면 로컬 실행용 기본값 `10000`을 사용합니다. 실행 로그에서 `Flask health server started`, `Discord bot login started`, `Discord bot connected`가 보이면 정상입니다.
-
-Slash command를 바로 테스트하려면 `DISCORD_GUILD_ID`를 테스트 서버 ID로 설정하세요. 봇 시작 시 해당 서버의 명령어를 현재 코드 기준으로 즉시 재동기화합니다. 배포 후 아래 두 명령으로 먼저 확인하면 됩니다.
+Slash command를 바로 테스트하려면 `DISCORD_GUILD_ID`를 테스트 서버 ID로 설정하세요. 봇 시작 시 해당 서버의 명령어를 현재 코드 기준으로 즉시 재동기화합니다. 실행 후 아래 명령으로 먼저 확인하면 됩니다.
 
 ```text
 /보유추가 엔비디아 10 120
 /분할매도 엔비디아 3 135
 /매매이력 엔비디아
 ```
-
-## Google Sheets 저장소
-
-Render, Termux, PC가 같은 데이터를 보도록 Google Sheets를 공용 저장소로 사용합니다. 아래 환경변수가 모두 있으면 `watchlist`, `holdings`, `trade_history`, `recommendation_history`는 Google Sheets를 먼저 읽고 씁니다. 저장 성공 후 같은 내용을 로컬 JSON에도 캐시합니다. Google Sheets가 비어 있고 로컬 JSON에 기존 데이터가 있으면 첫 로드 때 시트로 초기 동기화합니다. 환경변수가 없거나 시트 접근에 실패하면 로컬 JSON fallback을 사용합니다.
-
-```text
-GOOGLE_SERVICE_ACCOUNT_JSON=서비스 계정 JSON 전체 문자열
-GOOGLE_SHEETS_SPREADSHEET_ID=스프레드시트 ID
-```
-
-스프레드시트에는 아래 시트가 필요합니다. 없으면 봇이 자동 생성하고 헤더를 맞춥니다.
-
-- `watchlist`: `name`, `ticker`, `themes`, `subthemes`, `non_priority_themes`
-- `holdings`: `name`, `ticker`, `quantity`, `avg_price`, `themes`, `subthemes`, `non_priority_themes`
-- `trade_history`: `date`, `type`, `name`, `ticker`, `quantity`, `price`, `avg_price_before`, `avg_price_after`, `realized_profit`, `realized_return_pct`, `remaining_quantity`, `memo`
-- `recommendation_history`: `date`, `name`, `ticker`, `action`, `quant_score`, `timing_score`, `market_state`, `themes`, `memo`
-
-설정 순서:
-
-1. Google Cloud Console에서 프로젝트를 만들고 Google Sheets API를 활성화합니다.
-2. Service Account를 만들고 JSON 키를 발급합니다.
-3. Google Sheets 문서를 만들고 서비스 계정 이메일에 편집 권한을 공유합니다.
-4. Render, Termux, PC에 같은 `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_SHEETS_SPREADSHEET_ID` 값을 설정합니다.
-5. `/관심추가`, `/보유추가`, `/보유목록`, `/매매이력`을 실행해 같은 시트가 갱신되는지 확인합니다.
 
 지원 명령어:
 
@@ -156,6 +135,8 @@ GOOGLE_SHEETS_SPREADSHEET_ID=스프레드시트 ID
 - `/보유수정 종목명 수량 평단`: 오류 정정용 강제 수정
 - `/매매이력`: 최근 매매이력 10건 출력
 - `/매매이력 종목명`: 특정 종목 최근 매매이력 출력
+- `/성과추적`: 정기 리포트 추천이력의 최근 성과 확인
+- `/알고리즘성과`: 추천 알고리즘의 전체 성과 요약
 - `/보유삭제 종목명`: 보유종목 삭제
 - `/보유목록`: 보유수량, 평단, 현재가, 평가손익, 실현손익 누적 출력
 - `/포트폴리오점검`: 평가손익, 실현손익, 비중, 테마 편중, 리스크 점검
@@ -168,7 +149,7 @@ GOOGLE_SHEETS_SPREADSHEET_ID=스프레드시트 ID
 
 ## 관심종목
 
-관심종목은 Google Sheets의 `watchlist` 시트에서 우선 관리하고, 로컬 `watchlist.json`은 캐시/fallback으로 사용합니다.
+관심종목은 `data/watchlist.json`에서 관리합니다.
 
 질문봇에서는 종목명만 입력해 관심종목을 추가할 수 있습니다. `/관심추가 풍산`처럼 입력하면 아래 순서로 티커를 찾습니다.
 
@@ -181,7 +162,7 @@ GOOGLE_SHEETS_SPREADSHEET_ID=스프레드시트 ID
 
 테마는 `theme_map.json`에 있으면 자동 저장하고, 없으면 `미분류`로 저장합니다. 이후 `/관심테마수정 종목명 테마`로 수정할 수 있습니다.
 
-관심종목은 아직 매수하지 않은 후보군이고, 보유종목은 실제 매수한 포지션입니다. `/보유추가 엔비디아 10 120`처럼 종목명만 입력하면 `ticker_map.json`과 `theme_map.json`에서 티커와 테마를 자동으로 찾아 저장합니다. 이미 보유 중인 종목이면 수량이 더해지고 평균단가는 가중평균으로 자동 재계산됩니다. `/보유추가` 또는 `/관심매수`로 보유종목에 들어간 종목은 `watchlist` 시트에서 자동 제외됩니다. `/분할매도`와 `/전량매도`는 실현손익을 `trade_history` 시트에 저장합니다. `/보유삭제`는 관심종목으로 자동 복귀하지 않으며, 다시 후보로 보고 싶으면 `/관심추가`로 별도 등록합니다.
+관심종목은 아직 매수하지 않은 후보군이고, 보유종목은 실제 매수한 포지션입니다. `/보유추가 엔비디아 10 120`처럼 종목명만 입력하면 `ticker_map.json`과 `theme_map.json`에서 티커와 테마를 자동으로 찾아 저장합니다. 이미 보유 중인 종목이면 수량이 더해지고 평균단가는 가중평균으로 자동 재계산됩니다. `/보유추가` 또는 `/관심매수`로 보유종목에 들어간 종목은 `data/watchlist.json`에서 자동 제외됩니다. `/분할매도`와 `/전량매도`는 실현손익을 `data/trade_history.json`에 저장합니다. `/보유삭제`는 관심종목으로 자동 복귀하지 않으며, 다시 후보로 보고 싶으면 `/관심추가`로 별도 등록합니다.
 
 보유종목 평단은 해당 종목 거래통화 기준입니다. 한국주식은 KRW, 미국주식은 USD로 입력하며 원화/달러 자동 환산은 하지 않습니다.
 

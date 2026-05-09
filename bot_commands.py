@@ -59,6 +59,12 @@ def help_text() -> str:
 /매매이력 종목명
 → 최근 매매이력 10건을 보여줍니다.
 
+/성과추적
+→ 정기 리포트 추천종목의 최근 성과를 보여줍니다.
+
+/알고리즘성과
+→ 추천 알고리즘의 전체 성과를 요약합니다.
+
 평단 기준
 → 한국주식은 KRW, 미국주식은 USD 기준입니다. 원화/달러 자동 환산은 하지 않습니다.
 
@@ -737,6 +743,98 @@ def trade_history(query: str | None = None) -> str:
         memo = str(item.get("memo", "") or "-")
         lines.append(f"메모: **{memo}**")
         lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _recommendation_return(item: dict[str, object]) -> tuple[float | None, float | None, str | None]:
+    ticker = str(item.get("ticker", "") or "")
+    entry_price = float(item.get("price", 0) or 0)
+    if not ticker or entry_price <= 0:
+        return None, None, "추천 당시 기준가 없음"
+
+    analysis = analyzer.analyze_stock(
+        {
+            "name": str(item.get("name", ticker) or ticker),
+            "ticker": ticker,
+            "themes": item.get("themes", []) if isinstance(item.get("themes", []), list) else [],
+        },
+        [],
+        str(item.get("market_state", "횡보장") or "횡보장"),
+    )
+    if analysis.error or not analysis.current_price:
+        return entry_price, None, analysis.error or "현재가 조회 실패"
+
+    return_pct = ((analysis.current_price / entry_price) - 1) * 100
+    return entry_price, return_pct, None
+
+
+def recommendation_performance() -> str:
+    history = storage.load_recommendation_history(logger=command_log)
+    lines = analyzer.section("📈 성과추적")
+    if not history:
+        lines.append("추천이력 없음")
+        return "\n".join(lines).strip()
+
+    lines.append("기준: **최근 추천 10건**")
+    lines.append("")
+    for item in list(reversed(history))[:10]:
+        ticker = str(item.get("ticker", "") or "")
+        entry_price, return_pct, error = _recommendation_return(item)
+        lines.append(f"종목명: **{item.get('name', '-')}**")
+        lines.append(f"추천일: **{item.get('date', '-')}**")
+        lines.append(f"액션: **{item.get('action', '-')}**")
+        if entry_price:
+            lines.append(f"추천 기준가: **{analyzer.format_price_for_ticker(entry_price, ticker)}**")
+        if return_pct is not None:
+            lines.append(f"현재 성과: **{analyzer.format_pct(return_pct)}**")
+        else:
+            lines.append(f"현재 성과: **조회불가**")
+            if error:
+                lines.append(f"사유: **{error}**")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def algorithm_performance() -> str:
+    history = storage.load_recommendation_history(logger=command_log)
+    lines = analyzer.section("📊 알고리즘성과")
+    if not history:
+        lines.append("추천이력 없음")
+        return "\n".join(lines).strip()
+
+    assessed: list[tuple[dict[str, object], float]] = []
+    skipped = 0
+    for item in list(reversed(history))[:30]:
+        _, return_pct, _ = _recommendation_return(item)
+        if return_pct is None:
+            skipped += 1
+            continue
+        assessed.append((item, return_pct))
+
+    if not assessed:
+        lines.append(f"분석 가능 이력: **0건**")
+        lines.append(f"조회 제외: **{skipped}건**")
+        return "\n".join(lines).strip()
+
+    returns = [value for _, value in assessed]
+    wins = [value for value in returns if value > 0]
+    avg_return = sum(returns) / len(returns)
+    win_rate = len(wins) / len(returns) * 100
+    best_item, best_return = max(assessed, key=lambda pair: pair[1])
+    worst_item, worst_return = min(assessed, key=lambda pair: pair[1])
+
+    lines.append(f"분석 기준: **최근 최대 30건**")
+    lines.append(f"분석 가능 이력: **{len(assessed)}건**")
+    lines.append(f"승률: **{win_rate:.1f}%**")
+    lines.append(f"평균 성과: **{analyzer.format_pct(avg_return)}**")
+    lines.append("")
+    lines.append(f"최고 성과: **{best_item.get('name', '-')} / {analyzer.format_pct(best_return)}**")
+    lines.append(f"최저 성과: **{worst_item.get('name', '-')} / {analyzer.format_pct(worst_return)}**")
+    if skipped:
+        lines.append("")
+        lines.append(f"조회 제외: **{skipped}건**")
 
     return "\n".join(lines).strip()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,17 +16,18 @@ from config import (
     TRADE_HISTORY_FILE,
     WATCHLIST_FILE,
 )
-import sheets_storage
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-BASE_DIR = PROJECT_ROOT
+DATA_DIR = PROJECT_ROOT / "data"
+BASE_DIR = DATA_DIR
 Logger = Callable[[str], None] | None
-SHEETS_TABLES = {
-    WATCHLIST_FILE: "watchlist",
-    HOLDINGS_FILE: "holdings",
-    TRADE_HISTORY_FILE: "trade_history",
-    RECOMMENDATION_HISTORY_FILE: "recommendation_history",
+DATA_FILES = {
+    ALERTS_FILE,
+    HOLDINGS_FILE,
+    RECOMMENDATION_HISTORY_FILE,
+    TRADE_HISTORY_FILE,
+    WATCHLIST_FILE,
 }
 
 
@@ -43,6 +45,8 @@ def log(logger: Logger, message: str) -> None:
 
 
 def json_file_path(file_name: str) -> Path:
+    if file_name in DATA_FILES:
+        return DATA_DIR / file_name
     return PROJECT_ROOT / file_name
 
 
@@ -51,22 +55,42 @@ def json_file_path_text(file_name: str) -> str:
 
 
 def storage_location_text(file_name: str) -> str:
-    table_name = SHEETS_TABLES.get(file_name)
-    if table_name and sheets_storage.is_configured():
-        return f"Google Sheets:{table_name} / cache:{json_file_path(file_name)}"
     return str(json_file_path(file_name))
+
+
+def legacy_json_file_path(file_name: str) -> Path:
+    return PROJECT_ROOT / file_name
+
+
+def backup_file_path(file_name: str) -> Path:
+    path = json_file_path(file_name)
+    return path.with_suffix(path.suffix + ".bak")
+
+
+def _load_json_from_path(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as file:
+        return json.load(file)
 
 
 def _load_local_json_file(file_name: str, default: Any, *, required: bool = False, logger: Logger = None) -> Any:
     path = json_file_path(file_name)
     if not path.exists():
+        legacy_path = legacy_json_file_path(file_name)
+        if file_name in DATA_FILES and legacy_path.exists():
+            try:
+                payload = _load_json_from_path(legacy_path)
+                save_json_file(file_name, payload, logger=logger)
+                log(logger, f"{file_name} data 폴더 초기 이전 성공: {legacy_path} -> {path}")
+                return payload
+            except Exception as exc:
+                log(logger, f"{file_name} data 폴더 초기 이전 실패: {exc}. 기본값으로 진행합니다.")
+
         level = "필수" if required else "선택"
         log(logger, f"{file_name} 로드 실패: {level} 파일이 없습니다. 경로: {path}")
         return default
 
     try:
-        with path.open("r", encoding="utf-8") as file:
-            payload = json.load(file)
+        payload = _load_json_from_path(path)
     except json.JSONDecodeError as exc:
         log(logger, f"{file_name} 로드 실패: JSON 파싱 오류 - {exc}. 경로: {path}")
         return default
@@ -76,37 +100,27 @@ def _load_local_json_file(file_name: str, default: Any, *, required: bool = Fals
 
 
 def load_json_file(file_name: str, default: Any, *, required: bool = False, logger: Logger = None) -> Any:
-    table_name = SHEETS_TABLES.get(file_name)
-    if table_name and sheets_storage.is_configured():
-        try:
-            payload = sheets_storage.load_records(table_name)
-            if payload == [] and isinstance(default, list):
-                local_payload = _load_local_json_file(file_name, default, logger=None)
-                if isinstance(local_payload, list) and local_payload:
-                    sheets_storage.save_records(table_name, local_payload)
-                    payload = local_payload
-                    log(logger, f"{file_name} Google Sheets 초기 동기화 성공: 로컬 캐시 {describe_payload(payload)} -> sheet: {table_name}")
-            log(logger, f"{file_name} Google Sheets 로드 성공: {describe_payload(payload)} / sheet: {table_name}")
-            return payload
-        except Exception as exc:
-            log(logger, f"{file_name} Google Sheets 로드 실패: {exc}. 로컬 캐시로 진행합니다.")
-
     return _load_local_json_file(file_name, default, required=required, logger=logger)
 
 
 def save_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
     path = json_file_path(file_name)
-    table_name = SHEETS_TABLES.get(file_name)
-    if table_name and sheets_storage.is_configured():
-        if not isinstance(payload, list):
-            raise ValueError(f"{file_name}은 Google Sheets 저장 시 목록 형식이어야 합니다.")
-        sheets_storage.save_records(table_name, payload)
-        log(logger, f"{file_name} Google Sheets 저장 성공: {describe_payload(payload)} / sheet: {table_name}")
-
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as file:
+    if path.exists():
+        backup_path = backup_file_path(file_name)
+        shutil.copy2(path, backup_path)
+        log(logger, f"{file_name} 백업 생성: {backup_path}")
+
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    with temp_path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
         file.write("\n")
+    temp_path.replace(path)
+
+    verified_payload = _load_json_from_path(path)
+    if verified_payload != payload:
+        raise IOError(f"{file_name} 저장 검증 실패: 저장 후 다시 읽은 내용이 다릅니다. 경로: {path}")
+
     log(logger, f"{file_name} 저장 성공: {describe_payload(payload)} / 경로: {path}")
 
 

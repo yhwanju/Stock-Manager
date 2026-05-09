@@ -214,6 +214,16 @@ async def trade_history_command(interaction: discord.Interaction, 종목명: str
     await respond(interaction, bot_commands.trade_history, 종목명)
 
 
+@client.tree.command(name="성과추적", description="정기 리포트 추천종목의 최근 성과를 보여줍니다.")
+async def recommendation_performance_command(interaction: discord.Interaction) -> None:
+    await respond(interaction, bot_commands.recommendation_performance)
+
+
+@client.tree.command(name="알고리즘성과", description="추천 알고리즘의 전체 성과를 요약합니다.")
+async def algorithm_performance_command(interaction: discord.Interaction) -> None:
+    await respond(interaction, bot_commands.algorithm_performance)
+
+
 @client.tree.command(name="포트폴리오점검", description="보유종목 비중, 테마 편중, 리스크를 점검합니다.")
 async def portfolio_check_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.portfolio_check)
