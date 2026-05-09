@@ -88,6 +88,18 @@ def format_krw(value: float | int | None) -> str:
     return f"{float(value):,.0f}원"
 
 
+def is_korean_stock_ticker(ticker: str | None) -> bool:
+    return str(ticker or "").upper().endswith((".KS", ".KQ"))
+
+
+def format_price_for_ticker(value: float | int | None, ticker: str | None) -> str:
+    if value is None or not math.isfinite(float(value)):
+        return "-"
+    if is_korean_stock_ticker(ticker):
+        return format_krw(value)
+    return f"${float(value):,.2f}"
+
+
 def format_pct(value: float | None) -> str:
     if value is None or not math.isfinite(float(value)):
         return "-"
@@ -722,9 +734,10 @@ def summarize_holding_action(holdings: list[dict[str, Any]], holding_analyses: d
     return "관망"
 
 
-def append_price_block(lines: list[str], label: str, value: float | int | None) -> None:
+def append_price_block(lines: list[str], label: str, value: float | int | None, ticker: str | None = None) -> None:
     lines.append(f"{label}:")
-    lines.append(bold(format_krw(value)))
+    price_text = format_price_for_ticker(value, ticker) if ticker else format_krw(value)
+    lines.append(bold(price_text))
     lines.append("")
 
 
@@ -864,13 +877,13 @@ def build_daily_report_messages(
         message2.append(f"종목명: {bold(holding['name'])}")
         quantity_text = f"{quantity:,}주"
         message2.append(f"보유수량: {bold(quantity_text)}")
-        message2.append(f"평단: {bold(format_krw(average_price))}")
-        message2.append(f"현재가: {bold(format_krw(analysis.current_price))}")
+        message2.append(f"평단: {bold(format_price_for_ticker(average_price, ticker))}")
+        message2.append(f"현재가: {bold(format_price_for_ticker(analysis.current_price, ticker))}")
         message2.append(f"수익률: {bold(format_pct(profit_pct))}")
         message2.append(f"액션: {bold(action)}")
         message2.append("")
-        append_price_block(message2, "목표가", target_price)
-        append_price_block(message2, "손절가", stop_price)
+        append_price_block(message2, "목표가", target_price, ticker)
+        append_price_block(message2, "손절가", stop_price, ticker)
         append_risk_block(message2, action, market.state)
         if analysis.error:
             message2.append(f"오류: {analysis.error}")
@@ -1101,7 +1114,7 @@ def holdings_text() -> str:
         lines.append(f"티커: {bold(item.get('ticker', '-'))}")
         quantity_text = f"{int(item.get('quantity', 0)):,}주"
         lines.append(f"보유수량: {bold(quantity_text)}")
-        lines.append(f"평단: {bold(format_krw(holding_average_price(item)))}")
+        lines.append(f"평단: {bold(format_price_for_ticker(holding_average_price(item), str(item.get('ticker', ''))))}")
         lines.append("")
     return "\n".join(lines).strip()
 

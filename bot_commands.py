@@ -28,10 +28,13 @@ def help_text() -> str:
 → 현재 관심종목 목록을 보여줍니다.
 
 /관심매수 종목명 수량 평단
-→ 관심종목을 보유종목으로 이동합니다. 예: /관심매수 HK이노엔 50 49500
+→ 관심종목을 보유종목으로 이동하거나 자동 매핑으로 추가합니다. 예: /관심매수 HK이노엔 50 49500
 
-/보유추가 종목명 수량 평단 [티커]
+/보유추가 종목명 수량 평단
 → 보유종목을 추가하고 관심종목에서는 자동 제외합니다. 예: /보유추가 HK이노엔 50 49500
+
+평단 기준
+→ 한국주식은 KRW, 미국주식은 USD 기준입니다. 원화/달러 자동 환산은 하지 않습니다.
 
 /보유삭제 종목명
 → 보유종목을 삭제합니다.
@@ -186,10 +189,10 @@ def list_watchlist() -> str:
 def _holding_lookup_failed(name: str) -> str:
     return (
         f"종목명: **{name}**\n"
-        "상태: **티커 자동 매핑 실패**\n\n"
+        "상태: **자동 매핑 실패**\n\n"
         "안내:\n"
         "ticker_map.json에 해당 종목이 없습니다.\n"
-        "티커를 직접 입력하거나 ticker_map.json에 등록해주세요."
+        "먼저 ticker_map.json에 종목을 등록하거나 /관심추가직접 기능을 사용해주세요."
     )
 
 
@@ -214,43 +217,47 @@ def _format_holding_result(prefix: str, item: dict, watchlist_removed: bool) -> 
         f"관심종목 처리: **{watchlist_status}**\n"
         f"티커: **{item['ticker']}**\n"
         f"보유수량: **{quantity_text}**\n"
-        f"평단: **{analyzer.format_krw(float(average_price))}**"
+        f"평단: **{analyzer.format_price_for_ticker(float(average_price), str(item['ticker']))}**"
     )
 
 
-def add_holding(name: str, quantity: int, average_price: float, ticker: str | None = None) -> str:
-    clean_ticker = (ticker or "").strip()
+def _mapped_holding_payload(name: str) -> tuple[str, str, list[str], list[str], list[str], dict | None] | None:
+    ticker_map = storage.load_ticker_map()
+    ticker, mapped_name = storage.resolve_ticker(name, ticker_map)
+    if not ticker:
+        return None
+
     watchlist = storage.load_watchlist()
-    watchlist_item = storage.find_item(watchlist, name)
-
-    if not clean_ticker and watchlist_item:
-        clean_ticker = str(watchlist_item.get("ticker", ""))
-
-    mapped_name = None
-    if not clean_ticker:
-        clean_ticker, mapped_name = storage.resolve_ticker(name)
-        if not clean_ticker:
-            return _holding_lookup_failed(name)
+    watchlist_item = storage.find_item(watchlist, name) or storage.find_item(watchlist, ticker)
 
     display_name = (
         mapped_name
-        if mapped_name and (storage.normalize(name) == storage.normalize(clean_ticker) or name.strip().isdigit())
+        if mapped_name and (storage.normalize(name) == storage.normalize(ticker) or name.strip().isdigit())
         else name.strip()
     )
     if watchlist_item:
         display_name = str(watchlist_item.get("name", display_name))
 
-    themes, subthemes, non_priority = _holding_theme_fields(watchlist_item, name, clean_ticker)
+    themes, subthemes, non_priority = _holding_theme_fields(watchlist_item, name, ticker)
+    return display_name, ticker, themes, subthemes, non_priority, watchlist_item
+
+
+def add_holding(name: str, quantity: int, average_price: float) -> str:
+    resolved = _mapped_holding_payload(name)
+    if not resolved:
+        return _holding_lookup_failed(name)
+
+    display_name, ticker, themes, subthemes, non_priority, _ = resolved
     status, item = storage.upsert_holding(
         display_name,
-        clean_ticker,
+        ticker,
         quantity,
         average_price,
         themes,
         subthemes,
         non_priority,
     )
-    removed = storage.delete_watchlist(clean_ticker) or storage.delete_watchlist(display_name)
+    removed = storage.delete_watchlist(ticker) or storage.delete_watchlist(display_name) or storage.delete_watchlist(name)
     prefix = "보유종목 업데이트 완료" if status == "updated" else "보유종목 추가 완료"
     return _format_holding_result(prefix, item, bool(removed))
 
@@ -259,24 +266,30 @@ def buy_watchlist(name: str, quantity: int, average_price: float) -> str:
     watchlist = storage.load_watchlist()
     item = storage.find_item(watchlist, name)
     if not item:
-        return (
-            f"종목명: **{name}**\n"
-            "상태: **관심종목 없음**\n\n"
-            "안내:\n"
-            "먼저 /관심추가로 관심종목에 등록하거나 /보유추가로 직접 추가해주세요."
-        )
+        ticker, _ = storage.resolve_ticker(name)
+        if ticker:
+            item = storage.find_item(watchlist, ticker)
 
-    themes, subthemes, non_priority = analyzer.normalize_stock_theme_fields(item)
+    if item:
+        themes, subthemes, non_priority = analyzer.normalize_stock_theme_fields(item)
+        display_name = str(item.get("name", name))
+        ticker = str(item.get("ticker", ""))
+    else:
+        resolved = _mapped_holding_payload(name)
+        if not resolved:
+            return _holding_lookup_failed(name)
+        display_name, ticker, themes, subthemes, non_priority, _ = resolved
+
     status, holding = storage.upsert_holding(
-        str(item.get("name", name)),
-        str(item.get("ticker", "")),
+        display_name,
+        ticker,
         quantity,
         average_price,
         themes,
         subthemes,
         non_priority,
     )
-    removed = storage.delete_watchlist(str(item.get("ticker", name))) or storage.delete_watchlist(name)
+    removed = storage.delete_watchlist(ticker) or storage.delete_watchlist(display_name) or storage.delete_watchlist(name)
     prefix = "관심매수 업데이트 완료" if status == "updated" else "관심매수 완료"
     return _format_holding_result(prefix, holding, bool(removed))
 

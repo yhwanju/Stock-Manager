@@ -140,22 +140,21 @@ async def list_watchlist_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.list_watchlist)
 
 
-@client.tree.command(name="관심매수", description="관심종목을 보유종목으로 이동합니다.")
-@app_commands.describe(종목명="관심종목명 또는 티커", 수량="매수 수량", 평단="평균 단가")
+@client.tree.command(name="관심매수", description="관심종목을 보유종목으로 이동하거나 자동 매핑으로 추가합니다.")
+@app_commands.describe(종목명="종목명. 예: 엔비디아, HK이노엔, WDC", 수량="매수 수량", 평단="평균 단가")
 async def buy_watchlist_command(interaction: discord.Interaction, 종목명: str, 수량: int, 평단: float) -> None:
     await respond(interaction, bot_commands.buy_watchlist, 종목명, 수량, 평단)
 
 
 @client.tree.command(name="보유추가", description="보유종목을 추가하고 관심종목에서는 자동 제외합니다.")
-@app_commands.describe(종목명="종목명", 수량="보유 수량", 평단="평균 단가", 티커="선택: 예: 195940.KQ")
+@app_commands.describe(종목명="종목명. 예: 엔비디아, HK이노엔, WDC", 수량="보유 수량", 평단="평균 단가")
 async def add_holding_command(
     interaction: discord.Interaction,
     종목명: str,
     수량: int,
     평단: float,
-    티커: str = "",
 ) -> None:
-    await respond(interaction, bot_commands.add_holding, 종목명, 수량, 평단, 티커)
+    await respond(interaction, bot_commands.add_holding, 종목명, 수량, 평단)
 
 
 @client.tree.command(name="보유삭제", description="보유종목을 삭제합니다.")
