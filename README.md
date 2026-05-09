@@ -8,8 +8,11 @@
 - `discord_bot.py`: Discord slash command 질문봇 실행
 - `bot_commands.py`: 질문봇 명령어 처리
 - `analyzer.py`: 정기 리포트와 질문봇이 공유하는 분석 로직
-- `storage.py`: `watchlist.json`, `holdings.json`, `news_summary.json`, `alerts.json` 읽기/쓰기
+- `storage.py`: `watchlist.json`, `holdings.json`, `news_summary.json`, `alerts.json`, 매핑 파일 읽기/쓰기
 - `config.py`: 공통 설정, 시장 상태별 전략, 테마 키워드
+- `theme_config.json`: 우선 분석 대분류 테마와 세부 태그, 대표종목
+- `ticker_map.json`: 종목명과 티커 자동 매핑
+- `theme_map.json`: 종목명과 테마/세부태그 자동 매핑
 - `watchlist.json`: 관심종목
 - `holdings.json`: 보유종목
 - `alerts.json`: 목표가/손절가 알림 조건
@@ -73,7 +76,8 @@ python discord_bot.py
 - `/기능`: 전체 명령어 목록
 - `/종목분석 종목명`: 종목 상세 분석
 - `/강한테마종목`: 강한 테마 기준 추천종목 3개 이름만 출력
-- `/관심추가 종목명 티커`: 관심종목 추가
+- `/관심추가 종목명`: 티커와 테마 자동 매핑 후 관심종목 추가. 예: `/관심추가 엔비디아`
+- `/관심추가직접 종목명 티커 테마`: 직접 입력해 관심종목 추가. 예: `/관심추가직접 엔켐 348370.KQ 2차전지,ESS`
 - `/관심삭제 종목명`: 관심종목 삭제
 - `/관심목록`: 관심종목 목록
 - `/보유추가 종목명 티커 수량 평단`: 보유종목 추가/업데이트
@@ -91,6 +95,8 @@ python discord_bot.py
 
 관심종목은 `watchlist.json`에서 관리합니다.
 
+질문봇에서는 종목명만 입력해 관심종목을 추가할 수 있습니다. `/관심추가 엔비디아`처럼 입력하면 `ticker_map.json`에서 티커를 찾고, `theme_map.json`에서 테마와 세부태그를 찾아 `watchlist.json`에 저장합니다. 매핑이 없는 종목은 `/관심추가직접 종목명 티커 테마`로 직접 추가하거나 매핑 파일에 등록하세요.
+
 ```json
 [
   {
@@ -101,6 +107,30 @@ python discord_bot.py
 ```
 
 한국 종목은 코스피 `.KS`, 코스닥 `.KQ` 티커를 사용합니다.
+
+관심종목은 우선 분석 대분류 테마와 세부 태그를 함께 저장할 수 있습니다.
+
+```json
+[
+  {
+    "name": "WDC",
+    "ticker": "WDC",
+    "themes": ["AI"],
+    "subthemes": ["AI인프라", "스토리지"]
+  }
+]
+```
+
+우선 분석 대분류 테마는 `theme_config.json`에서 관리합니다. 현재 우선 테마는 AI, 반도체, 전력, 원전, 2차전지, ESS, 우주항공, 방산, 바이오/제약, 음식료, 로봇, 자율주행, 조선, 원자재, 건설, 금융입니다. 원자재는 세부 태그로 철강, 구리를 허용합니다. 클라우드는 별도 대분류가 아니라 AI의 세부 태그입니다.
+
+`/강한테마종목`과 심층분석 후보군은 전체 시장을 훑지 않고 아래 후보만 사용합니다.
+
+- 보유종목
+- 관심종목
+- 우선 분석 대분류 테마의 대표종목
+- `news_summary.json`에서 감지된 강한 테마 대표종목
+
+심층분석 후보군은 기본 최대 50개로 제한합니다.
 
 ## Discord 출력
 

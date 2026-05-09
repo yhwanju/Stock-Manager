@@ -30,6 +30,7 @@ class StockAnalysis:
     name: str
     ticker: str
     themes: list[str] = field(default_factory=list)
+    subthemes: list[str] = field(default_factory=list)
     current_price: float | None = None
     previous_close: float | None = None
     change_pct: float | None = None
@@ -67,6 +68,7 @@ class AnalysisContext:
     watchlist_items: list[dict[str, Any]]
     holdings: list[dict[str, Any]]
     news_summary: dict[str, Any]
+    theme_config: dict[str, Any] = field(default_factory=dict)
 
 
 def log(logger: Logger, message: str) -> None:
@@ -107,6 +109,139 @@ def section(title: str) -> list[str]:
 
 def normalize_text(value: str) -> str:
     return value.lower().replace(" ", "").replace("/", "")
+
+
+def priority_theme_names(theme_config: dict[str, Any]) -> list[str]:
+    priority = theme_config.get("priority_themes", {})
+    if isinstance(priority, dict) and priority:
+        return list(priority.keys())
+    return DEFAULT_THEMES[:]
+
+
+def canonical_theme(theme: str, theme_config: dict[str, Any] | None = None) -> str:
+    config = theme_config or storage.load_theme_config()
+    cleaned = str(theme).strip()
+    if not cleaned:
+        return cleaned
+
+    normalized = normalize_text(cleaned)
+    for priority_theme in priority_theme_names(config):
+        if normalize_text(priority_theme) == normalized:
+            return priority_theme
+
+    aliases = config.get("aliases", {})
+    if isinstance(aliases, dict):
+        for alias, target in aliases.items():
+            if normalize_text(str(alias)) == normalized:
+                return str(target)
+
+    priority = config.get("priority_themes", {})
+    if isinstance(priority, dict):
+        for priority_theme, meta in priority.items():
+            subthemes = meta.get("subthemes", []) if isinstance(meta, dict) else []
+            for subtheme in subthemes:
+                if normalize_text(str(subtheme)) == normalized:
+                    return str(priority_theme)
+
+    return cleaned
+
+
+def is_priority_theme(theme: str, theme_config: dict[str, Any] | None = None) -> bool:
+    config = theme_config or storage.load_theme_config()
+    canonical = canonical_theme(theme, config)
+    return canonical in priority_theme_names(config)
+
+
+def split_theme_values(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = str(value).split(",")
+    return [str(item).strip() for item in raw_values if str(item).strip()]
+
+
+def resolve_theme_inputs(value: str | list[str] | None, theme_config: dict[str, Any] | None = None) -> tuple[list[str], list[str], list[str]]:
+    config = theme_config or storage.load_theme_config()
+    priority = priority_theme_names(config)
+    themes: list[str] = []
+    subthemes: list[str] = []
+    non_priority: list[str] = []
+
+    priority_meta = config.get("priority_themes", {})
+    for raw_theme in split_theme_values(value):
+        canonical = canonical_theme(raw_theme, config)
+        if canonical in priority:
+            if canonical not in themes:
+                themes.append(canonical)
+            meta = priority_meta.get(canonical, {}) if isinstance(priority_meta, dict) else {}
+            for subtheme in meta.get("subthemes", []) if isinstance(meta, dict) else []:
+                if normalize_text(raw_theme) == normalize_text(str(subtheme)) and raw_theme not in subthemes:
+                    subthemes.append(raw_theme)
+        else:
+            if raw_theme not in non_priority:
+                non_priority.append(raw_theme)
+            if raw_theme not in themes:
+                themes.append(raw_theme)
+
+    return themes, subthemes, non_priority
+
+
+def normalize_stock_theme_fields(stock: dict[str, Any], theme_config: dict[str, Any] | None = None) -> tuple[list[str], list[str], list[str]]:
+    config = theme_config or storage.load_theme_config()
+    raw_themes = stock.get("themes", [])
+    raw_subthemes = stock.get("subthemes", [])
+    themes, subthemes, non_priority = resolve_theme_inputs(raw_themes, config)
+    for subtheme in split_theme_values(raw_subthemes):
+        parent = canonical_theme(subtheme, config)
+        if parent in priority_theme_names(config) and parent not in themes:
+            themes.append(parent)
+        if subtheme not in subthemes:
+            subthemes.append(subtheme)
+    for raw_theme in stock.get("non_priority_themes", []):
+        if raw_theme not in non_priority:
+            non_priority.append(raw_theme)
+    return themes, subthemes, non_priority
+
+
+def stock_theme_labels(stock: dict[str, Any], theme_config: dict[str, Any] | None = None) -> list[str]:
+    themes, subthemes, non_priority = normalize_stock_theme_fields(stock, theme_config)
+    return [*themes, *subthemes, *non_priority]
+
+
+def stock_matches_theme(stock: dict[str, Any] | StockAnalysis, theme: str, theme_config: dict[str, Any] | None = None) -> bool:
+    config = theme_config or storage.load_theme_config()
+    target = canonical_theme(theme, config)
+    source = {
+        "themes": getattr(stock, "themes", None) if not isinstance(stock, dict) else stock.get("themes", []),
+        "subthemes": getattr(stock, "subthemes", None) if not isinstance(stock, dict) else stock.get("subthemes", []),
+        "non_priority_themes": [] if not isinstance(stock, dict) else stock.get("non_priority_themes", []),
+    }
+    labels = stock_theme_labels(source, config)
+    return any(canonical_theme(label, config) == target or normalize_text(label) == normalize_text(theme) for label in labels)
+
+
+def theme_representatives(theme_config: dict[str, Any] | None = None, themes: list[str] | None = None) -> list[dict[str, Any]]:
+    config = theme_config or storage.load_theme_config()
+    selected = themes or priority_theme_names(config)
+    priority = config.get("priority_themes", {})
+    representatives: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if not isinstance(priority, dict):
+        return representatives
+    for theme in selected:
+        canonical = canonical_theme(theme, config)
+        meta = priority.get(canonical, {})
+        if not isinstance(meta, dict):
+            continue
+        for item in meta.get("representatives", []):
+            ticker = str(item.get("ticker", ""))
+            if not ticker or ticker in seen:
+                continue
+            representatives.append(item)
+            seen.add(ticker)
+    return representatives
 
 
 def contains_hangul(value: str) -> bool:
@@ -307,8 +442,8 @@ def build_risk_bullets(analysis: StockAnalysis, market_state: str) -> list[str]:
 def analyze_stock(stock: dict[str, Any], strong_themes: list[str], market_state: str) -> StockAnalysis:
     name = stock["name"]
     ticker = stock["ticker"]
-    themes = stock.get("themes", [])
-    analysis = StockAnalysis(name=name, ticker=ticker, themes=themes)
+    themes, subthemes, _ = normalize_stock_theme_fields(stock)
+    analysis = StockAnalysis(name=name, ticker=ticker, themes=themes, subthemes=subthemes)
 
     try:
         history = fetch_history(ticker)
@@ -470,6 +605,8 @@ def analyze_market() -> MarketSummary:
 
 
 def extract_themes_from_news(news_summary: dict[str, Any]) -> tuple[list[str], str]:
+    theme_config = storage.load_theme_config()
+    priority = priority_theme_names(theme_config)
     weighted: dict[str, int] = {}
     explicit_themes = news_summary.get("themes", [])
     key_news = news_summary.get("key_news", [])
@@ -477,7 +614,10 @@ def extract_themes_from_news(news_summary: dict[str, Any]) -> tuple[list[str], s
     def add_theme(theme: str, weight: int = 3) -> None:
         if not theme:
             return
-        weighted[theme] = weighted.get(theme, 0) + weight
+        canonical = canonical_theme(theme, theme_config)
+        if canonical not in priority:
+            return
+        weighted[canonical] = weighted.get(canonical, 0) + weight
 
     def parse_weight(value: Any, default: int = 3) -> int:
         try:
@@ -502,13 +642,27 @@ def extract_themes_from_news(news_summary: dict[str, Any]) -> tuple[list[str], s
             news_texts.append(str(item))
 
     combined_news = " ".join(news_texts)
+    keyword_map: dict[str, list[str]] = {}
+    priority_meta = theme_config.get("priority_themes", {})
+    for theme in priority:
+        keyword_map[theme] = [theme]
+        if isinstance(priority_meta, dict):
+            meta = priority_meta.get(theme, {})
+            if isinstance(meta, dict):
+                keyword_map[theme].extend(str(item) for item in meta.get("subthemes", []))
     for theme, keywords in THEME_KEYWORDS.items():
-        matches = sum(1 for keyword in keywords if keyword.lower() in combined_news.lower())
+        canonical = canonical_theme(theme, theme_config)
+        if canonical in priority:
+            keyword_map.setdefault(canonical, []).extend(keywords)
+
+    for theme, keywords in keyword_map.items():
+        matches = sum(1 for keyword in set(keywords) if keyword.lower() in combined_news.lower())
         if matches:
             add_theme(theme, matches)
 
     if not weighted:
-        return DEFAULT_THEMES[:3], "뉴스 연동 파일이 비어 있어 기본 관심 테마를 사용했습니다."
+        fallback = [theme for theme in DEFAULT_THEMES if theme in priority][:3] or priority[:3]
+        return fallback, "뉴스 연동 파일이 비어 있어 우선 분석 테마 기본값을 사용했습니다."
 
     ranked = sorted(weighted.items(), key=lambda item: item[1], reverse=True)
     return [theme for theme, _ in ranked[:3]], "뉴스 요약 파일을 반영했습니다."
@@ -584,6 +738,7 @@ def build_context(logger: Logger = None) -> AnalysisContext:
     watchlist_items = storage.load_watchlist(logger=logger)
     holdings = storage.load_holdings(logger=logger)
     news_summary = storage.load_news_summary(logger=logger)
+    theme_config = storage.load_theme_config(logger=logger)
     market = analyze_market()
     strong_themes, theme_note = extract_themes_from_news(news_summary)
     return AnalysisContext(
@@ -593,6 +748,7 @@ def build_context(logger: Logger = None) -> AnalysisContext:
         watchlist_items=watchlist_items,
         holdings=holdings,
         news_summary=news_summary,
+        theme_config=theme_config,
     )
 
 
@@ -749,9 +905,18 @@ def find_known_stock(query: str, context: AnalysisContext | None = None) -> dict
 def analyze_query_stock(query: str) -> tuple[StockAnalysis, AnalysisContext]:
     context = build_context()
     ticker_map = storage.load_ticker_map()
-    mapped_ticker = resolve_ticker_from_map(query, ticker_map)
+    mapped_ticker, mapped_name = storage.resolve_ticker(query, ticker_map)
     if mapped_ticker:
-        stock = {"name": query, "ticker": mapped_ticker}
+        display_name = (
+            mapped_name
+            if mapped_name and (storage.normalize(query) == storage.normalize(mapped_ticker) or query.strip().isdigit())
+            else query
+        )
+        stock: dict[str, Any] = {"name": display_name, "ticker": normalize_ticker_symbol(mapped_ticker)}
+        theme_payload, _ = storage.find_theme_mapping(query, mapped_ticker, ticker_map=ticker_map)
+        if theme_payload:
+            stock["themes"] = theme_payload.get("themes", [])
+            stock["subthemes"] = theme_payload.get("subthemes", [])
         return analyze_stock(stock, context.strong_themes, context.market.state), context
 
     known_stock = find_known_stock(query, context)
@@ -836,7 +1001,28 @@ def stock_detail_report(query: str) -> str:
 
 def strong_theme_stock_names() -> str:
     context = build_context()
-    analyses = analyze_watchlist(context)
+    strong_priority_themes = [
+        theme for theme in context.strong_themes
+        if is_priority_theme(theme, context.theme_config)
+    ]
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for stock in context.watchlist_items:
+        if strong_priority_themes and not any(stock_matches_theme(stock, theme, context.theme_config) for theme in strong_priority_themes):
+            continue
+        ticker = str(stock.get("ticker", ""))
+        if ticker and ticker not in seen:
+            candidates.append(stock)
+            seen.add(ticker)
+
+    for stock in theme_representatives(context.theme_config, strong_priority_themes):
+        ticker = str(stock.get("ticker", ""))
+        if ticker and ticker not in seen:
+            candidates.append(stock)
+            seen.add(ticker)
+
+    analyses = [analyze_stock(stock, context.strong_themes, context.market.state) for stock in candidates]
     ranked = sorted(
         [item for item in analyses if not item.error],
         key=lambda item: (item.composite_score, item.timing_score, item.quant_score),
@@ -852,12 +1038,34 @@ def strong_theme_stock_names() -> str:
 
 def watchlist_text() -> str:
     items = storage.load_watchlist()
-    lines = section("👀 관심목록")
+    theme_config = storage.load_theme_config()
+    lines = section("⭐ 관심종목 목록")
     if not items:
         lines.append("관심종목 없음")
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
     for item in items:
-        lines.append(f"종목명: {bold(item.get('name', '-'))}")
-        lines.append(f"티커: {bold(item.get('ticker', '-'))}")
+        themes, _, non_priority = normalize_stock_theme_fields(item, theme_config)
+        group_themes = themes or ["미분류"]
+        for theme in group_themes:
+            grouped.setdefault(theme, []).append(item)
+        for theme in non_priority:
+            grouped.setdefault(f"{theme} (비우선 테마)", []).append(item)
+
+    priority_order = priority_theme_names(theme_config)
+    ordered_themes = [theme for theme in priority_order if theme in grouped]
+    ordered_themes.extend(theme for theme in grouped if theme not in ordered_themes)
+
+    for theme in ordered_themes:
+        lines.append(f"**{theme}**")
+        lines.append("")
+        seen: set[str] = set()
+        for item in grouped[theme]:
+            ticker = str(item.get("ticker", "-"))
+            if ticker in seen:
+                continue
+            seen.add(ticker)
+            lines.append(f"* {item.get('name', '-')} / {ticker}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -882,7 +1090,7 @@ def portfolio_check_report() -> str:
     holding_analyses = analyze_holdings(context)
     total_value = 0.0
     rows: list[tuple[dict[str, Any], StockAnalysis, float, float | None]] = []
-    theme_counts: dict[str, int] = {}
+    theme_values: dict[str, float] = {}
     for holding in context.holdings:
         analysis = holding_analyses[holding["ticker"]]
         quantity = int(holding["quantity"])
@@ -892,8 +1100,9 @@ def portfolio_check_report() -> str:
         if analysis.current_price:
             profit_pct = ((analysis.current_price / float(holding["average_price"])) - 1) * 100
         rows.append((holding, analysis, value, profit_pct))
-        for theme in holding.get("themes", []):
-            theme_counts[theme] = theme_counts.get(theme, 0) + 1
+        themes, _, _ = normalize_stock_theme_fields(holding, context.theme_config)
+        for theme in themes or ["미분류"]:
+            theme_values[theme] = theme_values.get(theme, 0.0) + value
 
     lines = section("📦 포트폴리오점검")
     if not rows:
@@ -911,9 +1120,27 @@ def portfolio_check_report() -> str:
         lines.append(f"액션: {bold(action)}")
         lines.append("")
 
-    top_theme = max(theme_counts.items(), key=lambda item: item[1])[0] if theme_counts else "분산"
+    lines.append("테마별 비중:")
+    if theme_values and total_value:
+        for theme, value in sorted(theme_values.items(), key=lambda item: item[1], reverse=True):
+            lines.append(f"* {theme}: {value / total_value * 100:.1f}%")
+    else:
+        lines.append("* 미분류")
+    lines.append("")
+
+    top_theme, top_value = max(theme_values.items(), key=lambda item: item[1]) if theme_values else ("분산", 0.0)
+    top_weight = top_value / total_value * 100 if total_value else 0.0
+    missing_core = [
+        theme for theme in priority_theme_names(context.theme_config)
+        if theme not in theme_values
+    ][:3]
     lines.append("리스크 요약:")
-    lines.append(f"* 테마 편중: {top_theme}")
+    if top_weight >= 50:
+        lines.append(f"* {top_theme} 비중 과다: {top_weight:.1f}%")
+    else:
+        lines.append(f"* 최대 노출 테마: {top_theme} {top_weight:.1f}%")
+    if missing_core:
+        lines.append(f"* 노출 없음: {', '.join(missing_core)}")
     lines.append(f"* 현금 비중 제안: {context.market.cash_recommendation}")
     lines.append(f"* 시장 상태: {context.market.state}")
     return "\n".join(lines).strip()
@@ -989,7 +1216,7 @@ def theme_check_report(theme: str) -> str:
     watchlist = analyze_watchlist(context)
     related = [
         item for item in watchlist
-        if any(normalize_text(theme) in normalize_text(stock_theme) or normalize_text(stock_theme) in normalize_text(theme) for stock_theme in item.themes)
+        if stock_matches_theme(item, theme, context.theme_config)
         or normalize_text(theme) in normalize_text(item.name)
     ]
     theme_is_strong = any(normalize_text(theme) in normalize_text(strong) or normalize_text(strong) in normalize_text(theme) for strong in context.strong_themes)
@@ -1010,3 +1237,31 @@ def theme_check_report(theme: str) -> str:
     lines.append("* 뉴스 모멘텀 약화 시 순환매 가능")
     lines.append("* 거래량 과열 구간 추격매수 금지")
     return "\n".join(lines).strip()
+
+
+def build_deep_analysis_candidates(max_count: int | None = None) -> list[dict[str, Any]]:
+    context = build_context()
+    limit = max_count or int(context.theme_config.get("max_deep_analysis_candidates", 50) or 50)
+    strong_priority_themes = [
+        theme for theme in context.strong_themes
+        if is_priority_theme(theme, context.theme_config)
+    ]
+    pools = [
+        context.holdings,
+        context.watchlist_items,
+        theme_representatives(context.theme_config),
+        theme_representatives(context.theme_config, strong_priority_themes),
+    ]
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for pool in pools:
+        for item in pool:
+            ticker = str(item.get("ticker", ""))
+            if not ticker or ticker in seen:
+                continue
+            candidates.append(item)
+            seen.add(ticker)
+            if len(candidates) >= limit:
+                return candidates
+    return candidates

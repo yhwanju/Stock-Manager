@@ -93,9 +93,15 @@ async def strong_theme_stocks_command(interaction: discord.Interaction) -> None:
 
 
 @client.tree.command(name="관심추가", description="관심종목을 추가합니다.")
-@app_commands.describe(종목명="종목명", 티커="예: 348370.KQ")
-async def add_watchlist_command(interaction: discord.Interaction, 종목명: str, 티커: str) -> None:
-    await respond(interaction, bot_commands.add_watchlist, 종목명, 티커)
+@app_commands.describe(종목명="종목명 또는 티커. 예: 엔비디아, WDC, 두산")
+async def add_watchlist_command(interaction: discord.Interaction, 종목명: str) -> None:
+    await respond(interaction, bot_commands.add_watchlist, 종목명)
+
+
+@client.tree.command(name="관심추가직접", description="티커와 테마를 직접 입력해 관심종목을 추가합니다.")
+@app_commands.describe(종목명="종목명", 티커="예: 348370.KQ", 테마="예: 2차전지,ESS")
+async def add_watchlist_manual_command(interaction: discord.Interaction, 종목명: str, 티커: str, 테마: str) -> None:
+    await respond(interaction, bot_commands.add_watchlist_manual, 종목명, 티커, 테마)
 
 
 @client.tree.command(name="관심삭제", description="관심종목을 삭제합니다.")

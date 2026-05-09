@@ -4,7 +4,15 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from config import ALERTS_FILE, HOLDINGS_FILE, NEWS_SUMMARY_FILE, TICKER_MAP_FILE, WATCHLIST_FILE
+from config import (
+    ALERTS_FILE,
+    HOLDINGS_FILE,
+    NEWS_SUMMARY_FILE,
+    THEME_CONFIG_FILE,
+    THEME_MAP_FILE,
+    TICKER_MAP_FILE,
+    WATCHLIST_FILE,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -89,6 +97,68 @@ def load_ticker_map(logger: Logger = None) -> dict[str, str]:
     return {str(key): str(value) for key, value in payload.items()}
 
 
+def load_theme_map(logger: Logger = None) -> dict[str, dict[str, Any]]:
+    payload = load_json_file(THEME_MAP_FILE, {}, logger=logger)
+    if not isinstance(payload, dict):
+        log(logger, f"{THEME_MAP_FILE} 로드 실패: 객체 형식이 아닙니다. 기본값으로 진행합니다.")
+        return {}
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            normalized[str(key)] = value
+    return normalized
+
+
+def load_theme_config(logger: Logger = None) -> dict[str, Any]:
+    payload = load_json_file(THEME_CONFIG_FILE, {}, logger=logger)
+    if not isinstance(payload, dict):
+        log(logger, f"{THEME_CONFIG_FILE} 로드 실패: 객체 형식이 아닙니다. 기본값으로 진행합니다.")
+        return {}
+    return payload
+
+
+def resolve_ticker(query: str, ticker_map: dict[str, str] | None = None) -> tuple[str | None, str | None]:
+    ticker_map = ticker_map or load_ticker_map()
+    normalized_query = normalize(query)
+    for name, ticker in ticker_map.items():
+        normalized_ticker = normalize(ticker)
+        if normalize(name) == normalized_query:
+            return ticker, name
+        if normalized_ticker == normalized_query:
+            return ticker, name
+        if normalized_query.isdigit() and normalized_ticker.startswith(f"{normalized_query}."):
+            return ticker, name
+    return None, None
+
+
+def find_theme_mapping(
+    query: str,
+    ticker: str | None = None,
+    *,
+    theme_map: dict[str, dict[str, Any]] | None = None,
+    ticker_map: dict[str, str] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    theme_map = theme_map or load_theme_map()
+    ticker_map = ticker_map or load_ticker_map()
+    candidates = [query]
+    if ticker:
+        candidates.append(ticker)
+
+    for name, mapped_ticker in ticker_map.items():
+        if ticker and normalize(mapped_ticker) == normalize(ticker):
+            candidates.append(name)
+        if normalize(name) == normalize(query):
+            candidates.append(name)
+            candidates.append(mapped_ticker)
+
+    normalized_candidates = {normalize(candidate) for candidate in candidates if candidate}
+    for name, payload in theme_map.items():
+        if normalize(name) in normalized_candidates:
+            return payload, name
+    return None, None
+
+
 def find_item(items: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
     normalized_query = normalize(query)
     for item in items:
@@ -99,10 +169,22 @@ def find_item(items: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
     return None
 
 
-def upsert_watchlist(name: str, ticker: str) -> tuple[str, dict[str, Any]]:
+def upsert_watchlist(
+    name: str,
+    ticker: str,
+    themes: list[str] | None = None,
+    subthemes: list[str] | None = None,
+    non_priority_themes: list[str] | None = None,
+) -> tuple[str, dict[str, Any]]:
     items = load_watchlist()
     existing = find_item(items, name) or find_item(items, ticker)
-    payload = {"name": name, "ticker": ticker}
+    payload: dict[str, Any] = {"name": name, "ticker": ticker}
+    if themes is not None:
+        payload["themes"] = themes
+    if subthemes is not None:
+        payload["subthemes"] = subthemes
+    if non_priority_themes:
+        payload["non_priority_themes"] = non_priority_themes
     if existing:
         existing.update(payload)
         save_watchlist(items)

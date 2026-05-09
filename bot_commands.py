@@ -15,8 +15,11 @@ def help_text() -> str:
 /강한테마종목
 → 오늘 강한 테마 기준 추천종목 3개 이름만 보여줍니다.
 
-/관심추가 종목명 티커
-→ 관심종목을 추가합니다. 예: /관심추가 엔켐 348370.KQ
+/관심추가 종목명
+→ 티커와 테마를 자동으로 찾아 관심종목을 추가합니다. 예: /관심추가 엔비디아
+
+/관심추가직접 종목명 티커 테마
+→ 직접 입력해 관심종목을 추가합니다. 예: /관심추가직접 엔켐 348370.KQ 2차전지,ESS
 
 /관심삭제 종목명
 → 관심종목을 삭제합니다. 예: /관심삭제 엔켐
@@ -63,11 +66,90 @@ def strong_theme_stocks() -> str:
     return analyzer.strong_theme_stock_names()
 
 
-def add_watchlist(name: str, ticker: str) -> str:
-    status, item = storage.upsert_watchlist(name, ticker)
+def _format_watchlist_item(prefix: str, item: dict, warning: str = "") -> str:
+    theme_label = ", ".join(item.get("themes", [])) or "-"
+    subtheme_label = ", ".join(item.get("subthemes", [])) or "-"
+    return (
+        f"{prefix}\n"
+        f"종목명: **{item['name']}**\n"
+        f"티커: **{item['ticker']}**\n"
+        f"테마: **{theme_label}**\n"
+        f"세부태그: **{subtheme_label}**"
+        f"{warning}"
+    )
+
+
+def _theme_fields_from_payload(payload: dict) -> tuple[list[str], list[str], list[str]]:
+    theme_config = storage.load_theme_config()
+    themes, subthemes, non_priority = analyzer.resolve_theme_inputs(payload.get("themes", []), theme_config)
+    for subtheme in analyzer.split_theme_values(payload.get("subthemes", [])):
+        if subtheme not in subthemes:
+            subthemes.append(subtheme)
+    return themes, subthemes, non_priority
+
+
+def _ticker_lookup_failed(name: str) -> str:
+    return (
+        f"종목명: **{name}**\n"
+        "상태: **자동 매핑 실패**\n\n"
+        "안내:\n"
+        "ticker_map.json에 해당 종목이 없습니다.\n"
+        "아래 형식으로 직접 추가하거나 ticker_map.json에 등록해주세요.\n\n"
+        "/관심추가직접 종목명 티커 테마"
+    )
+
+
+def _theme_lookup_failed(name: str, ticker: str) -> str:
+    return (
+        f"종목명: **{name}**\n"
+        f"티커: **{ticker}**\n"
+        "상태: **테마 자동 매핑 실패**\n\n"
+        "안내:\n"
+        "theme_map.json에 해당 종목이 없습니다.\n"
+        "아래 형식으로 직접 추가하거나 theme_map.json에 등록해주세요.\n\n"
+        "/관심추가직접 종목명 티커 테마"
+    )
+
+
+def add_watchlist(name: str) -> str:
+    ticker_map = storage.load_ticker_map()
+    ticker, mapped_name = storage.resolve_ticker(name, ticker_map)
+    if not ticker:
+        return _ticker_lookup_failed(name)
+
+    display_name = (
+        mapped_name
+        if mapped_name and (storage.normalize(name) == storage.normalize(ticker) or name.strip().isdigit())
+        else name.strip()
+    )
+    theme_payload, _ = storage.find_theme_mapping(name, ticker, ticker_map=ticker_map)
+    if not theme_payload or not theme_payload.get("themes"):
+        return _theme_lookup_failed(display_name, ticker)
+
+    watchlist = storage.load_watchlist()
+    existing = storage.find_item(watchlist, display_name) or storage.find_item(watchlist, ticker)
+    if existing:
+        return _format_watchlist_item("이미 관심종목에 있습니다.", existing)
+
+    themes, subthemes, non_priority = _theme_fields_from_payload(theme_payload)
+    status, item = storage.upsert_watchlist(display_name, ticker, themes, subthemes, non_priority)
+    warning = ""
+    if non_priority:
+        warning = f"\n경고: **{', '.join(non_priority)}**은(는) 비우선 테마로 저장했습니다."
+    _ = status
+    return _format_watchlist_item("관심종목을 추가했습니다.", item, warning)
+
+
+def add_watchlist_manual(name: str, ticker: str, themes_text: str) -> str:
+    theme_config = storage.load_theme_config()
+    themes, subthemes, non_priority = analyzer.resolve_theme_inputs(themes_text, theme_config)
+    status, item = storage.upsert_watchlist(name, ticker, themes, subthemes, non_priority)
+    warning = ""
+    if non_priority:
+        warning = f"\n경고: **{', '.join(non_priority)}**은(는) 비우선 테마로 저장했습니다."
     if status == "updated":
-        return f"관심종목 중복으로 업데이트했습니다.\n종목명: **{item['name']}**\n티커: **{item['ticker']}**"
-    return f"관심종목을 추가했습니다.\n종목명: **{item['name']}**\n티커: **{item['ticker']}**"
+        return _format_watchlist_item("관심종목 중복으로 업데이트했습니다.", item, warning)
+    return _format_watchlist_item("관심종목을 추가했습니다.", item, warning)
 
 
 def delete_watchlist(query: str) -> str:

@@ -1,14 +1,20 @@
 [
   {
     "name": "한중엔시에스",
-    "ticker": "107640.KQ"
+    "ticker": "107640.KQ",
+    "themes": ["전력", "ESS"],
+    "subthemes": ["에너지저장장치", "전력변환"]
   },
   {
     "name": "LG에너지솔루션",
-    "ticker": "373220.KS"
+    "ticker": "373220.KS",
+    "themes": ["2차전지", "ESS"],
+    "subthemes": ["배터리", "전기차", "에너지저장장치"]
   },
   {
     "name": "두산",
-    "ticker": "000150.KS"
+    "ticker": "000150.KS",
+    "themes": ["원전", "로봇", "전력"],
+    "subthemes": ["SMR", "협동로봇", "전력기기"]
   }
 ]

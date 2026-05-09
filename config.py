@@ -11,6 +11,8 @@ HOLDINGS_FILE = "holdings.json"
 NEWS_SUMMARY_FILE = "news_summary.json"
 ALERTS_FILE = "alerts.json"
 TICKER_MAP_FILE = "ticker_map.json"
+THEME_MAP_FILE = "theme_map.json"
+THEME_CONFIG_FILE = "theme_config.json"
 
 HISTORY_PERIOD = "6mo"
 HISTORY_INTERVAL = "1d"

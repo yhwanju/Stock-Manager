@@ -1,0 +1,125 @@
+{
+  "max_deep_analysis_candidates": 50,
+  "aliases": {
+    "음식료/수산": "음식료",
+    "수산": "음식료",
+    "가공식품": "음식료",
+    "전력기기": "전력",
+    "전력망": "전력",
+    "원자력": "원전",
+    "자동차부품": "자율주행",
+    "전장": "자율주행",
+    "AI인프라": "AI",
+    "클라우드": "AI",
+    "데이터센터": "AI",
+    "스토리지": "AI",
+    "서버": "AI",
+    "철강": "원자재",
+    "구리": "원자재"
+  },
+  "priority_themes": {
+    "AI": {
+      "subthemes": ["AI인프라", "클라우드", "데이터센터", "스토리지", "서버"],
+      "representatives": [
+        {"name": "엔비디아", "ticker": "NVDA", "themes": ["AI", "반도체"], "subthemes": ["AI인프라", "데이터센터", "서버"]},
+        {"name": "WDC", "ticker": "WDC", "themes": ["AI"], "subthemes": ["AI인프라", "데이터센터", "스토리지"]},
+        {"name": "팔란티어", "ticker": "PLTR", "themes": ["AI"], "subthemes": ["AI인프라"]}
+      ]
+    },
+    "반도체": {
+      "subthemes": ["HBM", "메모리", "파운드리", "장비", "소재"],
+      "representatives": [
+        {"name": "삼성전자", "ticker": "005930.KS", "themes": ["반도체"], "subthemes": ["메모리", "파운드리"]},
+        {"name": "SK하이닉스", "ticker": "000660.KS", "themes": ["반도체"], "subthemes": ["HBM", "메모리"]},
+        {"name": "엔비디아", "ticker": "NVDA", "themes": ["AI", "반도체"], "subthemes": ["AI인프라"]}
+      ]
+    },
+    "전력": {
+      "subthemes": ["전력기기", "전력망", "변압기", "송전"],
+      "representatives": [
+        {"name": "두산", "ticker": "000150.KS", "themes": ["전력", "원전", "로봇"], "subthemes": ["전력기기"]},
+        {"name": "HD현대일렉트릭", "ticker": "267260.KS", "themes": ["전력"], "subthemes": ["전력기기", "변압기"]}
+      ]
+    },
+    "원전": {
+      "subthemes": ["SMR", "원전수출", "원자력"],
+      "representatives": [
+        {"name": "두산", "ticker": "000150.KS", "themes": ["원전", "로봇", "전력"], "subthemes": ["SMR", "원전수출"]}
+      ]
+    },
+    "2차전지": {
+      "subthemes": ["배터리", "양극재", "음극재", "리튬", "전고체"],
+      "representatives": [
+        {"name": "LG에너지솔루션", "ticker": "373220.KS", "themes": ["2차전지"], "subthemes": ["배터리"]},
+        {"name": "한중엔시에스", "ticker": "107640.KQ", "themes": ["2차전지", "ESS"], "subthemes": ["ESS"]}
+      ]
+    },
+    "ESS": {
+      "subthemes": ["에너지저장장치", "배터리저장", "전력저장"],
+      "representatives": [
+        {"name": "한중엔시에스", "ticker": "107640.KQ", "themes": ["ESS", "2차전지"], "subthemes": ["에너지저장장치"]}
+      ]
+    },
+    "우주항공": {
+      "subthemes": ["위성", "발사체", "항공엔진"],
+      "representatives": [
+        {"name": "한화에어로스페이스", "ticker": "012450.KS", "themes": ["우주항공", "방산"], "subthemes": ["항공엔진"]}
+      ]
+    },
+    "방산": {
+      "subthemes": ["방위산업", "탄약", "항공방산", "함정"],
+      "representatives": [
+        {"name": "한화에어로스페이스", "ticker": "012450.KS", "themes": ["방산", "우주항공"], "subthemes": ["항공방산"]}
+      ]
+    },
+    "바이오/제약": {
+      "subthemes": ["신약", "임상", "FDA", "헬스케어"],
+      "representatives": [
+        {"name": "HK이노엔", "ticker": "195940.KQ", "themes": ["바이오/제약"], "subthemes": ["신약", "헬스케어"]}
+      ]
+    },
+    "음식료": {
+      "subthemes": ["수산", "가공식품", "식품", "원양"],
+      "representatives": [
+        {"name": "CJ씨푸드", "ticker": "011150.KS", "themes": ["음식료"], "subthemes": ["수산", "가공식품"]}
+      ]
+    },
+    "로봇": {
+      "subthemes": ["협동로봇", "휴머노이드", "자동화"],
+      "representatives": [
+        {"name": "두산", "ticker": "000150.KS", "themes": ["로봇", "전력", "원전"], "subthemes": ["협동로봇"]}
+      ]
+    },
+    "자율주행": {
+      "subthemes": ["전장", "센서", "ADAS", "자동차부품"],
+      "representatives": [
+        {"name": "티에이치엔", "ticker": "019180.KS", "themes": ["자율주행"], "subthemes": ["전장", "자동차부품"]}
+      ]
+    },
+    "조선": {
+      "subthemes": ["LNG선", "해양플랜트", "선박엔진"],
+      "representatives": [
+        {"name": "HD현대중공업", "ticker": "329180.KS", "themes": ["조선"], "subthemes": ["LNG선"]}
+      ]
+    },
+    "원자재": {
+      "subthemes": ["철강", "구리"],
+      "representatives": [
+        {"name": "POSCO홀딩스", "ticker": "005490.KS", "themes": ["원자재"], "subthemes": ["철강"]},
+        {"name": "풍산", "ticker": "103140.KS", "themes": ["원자재"], "subthemes": ["구리"]}
+      ]
+    },
+    "건설": {
+      "subthemes": ["인프라", "플랜트", "주택"],
+      "representatives": [
+        {"name": "현대건설", "ticker": "000720.KS", "themes": ["건설"], "subthemes": ["인프라", "플랜트"]}
+      ]
+    },
+    "금융": {
+      "subthemes": ["은행", "증권", "보험", "주주환원"],
+      "representatives": [
+        {"name": "KB금융", "ticker": "105560.KS", "themes": ["금융"], "subthemes": ["은행", "주주환원"]}
+      ]
+    }
+  }
+}
