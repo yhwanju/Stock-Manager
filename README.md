@@ -101,6 +101,13 @@ PORT=Render가 자동 설정
 
 `PORT`가 없으면 로컬 실행용 기본값 `10000`을 사용합니다. 실행 로그에서 `Flask health server started`, `Discord bot login started`, `Discord bot connected`가 보이면 정상입니다.
 
+Slash command를 바로 테스트하려면 `DISCORD_GUILD_ID`를 테스트 서버 ID로 설정하세요. 봇 시작 시 해당 서버의 명령어를 현재 코드 기준으로 즉시 재동기화합니다. 배포 후 아래 두 명령으로 먼저 확인하면 됩니다.
+
+```text
+/보유추가 엔비디아 10 120
+/보유추가 HK이노엔 50 49500
+```
+
 지원 명령어:
 
 - `/기능`: 전체 명령어 목록

@@ -48,12 +48,15 @@ class StockManagerClient(discord.Client):
         guild_id = os.getenv("DISCORD_GUILD_ID")
         if guild_id:
             guild = discord.Object(id=int(guild_id))
+            self.tree.clear_commands(guild=guild)
             self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            print(f"[stock-question-bot] slash commands synced to guild {guild_id}", flush=True)
+            synced = await self.tree.sync(guild=guild)
+            command_names = ", ".join(command.name for command in synced)
+            print(f"[stock-question-bot] slash commands synced to guild {guild_id}: {command_names}", flush=True)
         else:
-            await self.tree.sync()
-            print("[stock-question-bot] global slash commands synced", flush=True)
+            synced = await self.tree.sync()
+            command_names = ", ".join(command.name for command in synced)
+            print(f"[stock-question-bot] global slash commands synced: {command_names}", flush=True)
 
 
 client = StockManagerClient()
