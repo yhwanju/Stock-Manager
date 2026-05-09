@@ -68,6 +68,17 @@ def backup_file_path(file_name: str) -> Path:
     return path.with_suffix(path.suffix + ".bak")
 
 
+def restore_backup_file(file_name: str, logger: Logger = None) -> bool:
+    path = json_file_path(file_name)
+    backup_path = backup_file_path(file_name)
+    if not backup_path.exists():
+        log(logger, f"{file_name} 롤백 실패: 백업 파일이 없습니다. 경로: {backup_path}")
+        return False
+    shutil.copy2(backup_path, path)
+    log(logger, f"{file_name} 롤백 완료: {backup_path} -> {path}")
+    return True
+
+
 def _load_json_from_path(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as file:
         return json.load(file)
@@ -109,22 +120,31 @@ def save_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
     path = json_file_path(file_name)
     log(logger, f"{file_name} 저장 파일 경로: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_file_path(file_name)
+    has_backup = False
     if path.exists():
-        backup_path = backup_file_path(file_name)
         shutil.copy2(path, backup_path)
+        has_backup = True
         log(logger, f"{file_name} 백업 생성: {backup_path}")
 
     temp_path = path.with_suffix(path.suffix + ".tmp")
-    with temp_path.open("w", encoding="utf-8") as file:
-        json.dump(payload, file, ensure_ascii=False, indent=2)
-        file.write("\n")
-        file.flush()
-        os.fsync(file.fileno())
-    temp_path.replace(path)
+    try:
+        with temp_path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        temp_path.replace(path)
 
-    verified_payload = _load_json_from_path(path)
-    if verified_payload != payload:
-        raise IOError(f"{file_name} 저장 검증 실패: 저장 후 다시 읽은 내용이 다릅니다. 경로: {path}")
+        verified_payload = _load_json_from_path(path)
+        if verified_payload != payload:
+            raise IOError(f"{file_name} 저장 검증 실패: 저장 후 다시 읽은 내용이 다릅니다. 경로: {path}")
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        if has_backup:
+            restore_backup_file(file_name, logger=logger)
+        raise
 
     log(logger, f"{file_name} 저장 성공: {describe_payload(payload)} / 경로: {path}")
 
@@ -146,24 +166,48 @@ def save_watchlist(items: list[dict[str, Any]], logger: Logger = None) -> None:
 
 
 def load_holdings(logger: Logger = None) -> list[dict[str, Any]]:
-    log(logger, f"holdings 읽기 경로 확인: {storage_location_text(HOLDINGS_FILE)}")
-    payload = load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
+    path = json_file_path(HOLDINGS_FILE)
+    log(logger, f"holdings 읽기 경로 확인: {path}")
+    if path.exists():
+        try:
+            payload = _load_json_from_path(path)
+        except json.JSONDecodeError as exc:
+            raise IOError(f"holdings 로드 실패: JSON 파싱 오류 - {exc}. 경로: {path}") from exc
+        log(logger, f"{HOLDINGS_FILE} 로드 성공: {describe_payload(payload)} / 경로: {path}")
+    else:
+        payload = load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
+
     if not isinstance(payload, list):
-        log(logger, f"{HOLDINGS_FILE} 로드 실패: 목록 형식이 아닙니다. 저장소: {storage_location_text(HOLDINGS_FILE)}")
-        return []
+        raise IOError(f"holdings 로드 실패: 목록 형식이 아닙니다. 경로: {path}")
     log(logger, f"holdings 읽기 완료: {len(payload)}개 / 경로: {storage_location_text(HOLDINGS_FILE)}")
     return payload
 
 
-def save_holdings(items: list[dict[str, Any]], logger: Logger = None) -> None:
+def save_holdings(
+    items: list[dict[str, Any]],
+    logger: Logger = None,
+    *,
+    previous_count: int | None = None,
+    min_expected_count: int | None = None,
+) -> None:
     path = json_file_path(HOLDINGS_FILE)
     log(logger, f"holdings 저장 시작: {len(items)}개 / 경로: {path}")
+    if previous_count is not None:
+        log(logger, f"기존 holdings: {previous_count}개")
     save_json_file(HOLDINGS_FILE, items, logger=logger)
     verified = load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
     if not isinstance(verified, list):
+        restore_backup_file(HOLDINGS_FILE, logger=logger)
         raise IOError(f"holdings 저장 검증 실패: 다시 읽은 데이터가 목록 형식이 아닙니다. 경로: {path}")
     log(logger, f"holdings 저장 후 재읽기 완료: {len(verified)}개 / 경로: {path}")
+    if min_expected_count is not None and len(verified) < min_expected_count:
+        restore_backup_file(HOLDINGS_FILE, logger=logger)
+        raise IOError(
+            f"holdings 저장 검증 실패: 저장 후 종목 수가 비정상 감소했습니다. "
+            f"기대 최소 {min_expected_count}개, 실제 {len(verified)}개 / 경로: {path}"
+        )
     if verified != items:
+        restore_backup_file(HOLDINGS_FILE, logger=logger)
         raise IOError(f"holdings 저장 검증 실패: 저장 요청 데이터와 재읽기 데이터가 다릅니다. 경로: {path}")
     log(logger, f"holdings 저장 검증 성공: {len(verified)}개 / 경로: {path}")
 
@@ -384,6 +428,8 @@ def buy_holding(
     logger: Logger = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
     items = load_holdings(logger=logger)
+    before_count = len(items)
+    log(logger, f"기존 holdings: {before_count}개")
     existing = find_item(items, ticker) or find_item(items, name)
     buy_quantity = int(quantity)
     buy_price_value = float(buy_price)
@@ -412,7 +458,8 @@ def buy_holding(
         if non_priority_themes and not existing.get("non_priority_themes"):
             existing["non_priority_themes"] = non_priority_themes
 
-        save_holdings(items, logger=logger)
+        log(logger, f"추가 후 holdings: {len(items)}개")
+        save_holdings(items, logger=logger, previous_count=before_count, min_expected_count=before_count)
         return "additional_buy", existing, before
 
     payload: dict[str, Any] = {
@@ -429,7 +476,8 @@ def buy_holding(
         payload["non_priority_themes"] = non_priority_themes
 
     items.append(payload)
-    save_holdings(items, logger=logger)
+    log(logger, f"추가 후 holdings: {len(items)}개")
+    save_holdings(items, logger=logger, previous_count=before_count, min_expected_count=before_count + 1)
     return "new_buy", payload, None
 
 
