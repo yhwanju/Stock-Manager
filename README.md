@@ -89,6 +89,8 @@ Build Command: pip install -r requirements.txt
 Start Command: python discord_bot.py
 ```
 
+저장소에는 `render.yaml`도 포함되어 있어 Render Blueprint로 바로 적용할 수 있습니다. Render에서 New Blueprint를 선택하고 이 저장소를 연결한 뒤, 아래 환경변수만 직접 입력하면 됩니다.
+
 Environment Variables:
 
 ```text
