@@ -1452,9 +1452,11 @@ def watchlist_text() -> str:
     return "\n".join(lines).strip()
 
 
-def holdings_text() -> str:
-    storage.prune_watchlist_holdings_overlap()
-    items = storage.load_holdings()
+def holdings_text(items: list[dict[str, Any]] | None = None, logger: Logger = None) -> str:
+    if items is None:
+        storage.prune_watchlist_holdings_overlap(logger=logger)
+        items = storage.load_holdings(logger=logger)
+    log(logger, f"보유목록 출력 준비: holdings.json {len(items)}개 / 경로: {storage.json_file_path_text(storage.HOLDINGS_FILE)}")
     lines = section("💼 보유목록")
     if not items:
         lines.append("보유종목 없음")

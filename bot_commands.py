@@ -4,6 +4,10 @@ import analyzer
 import storage
 
 
+def command_log(message: str) -> None:
+    print(f"[stock-question-bot] {message}", flush=True)
+
+
 def help_text() -> str:
     return """━━━━━━━━━━
 **🤖 주식관리봇 기능**
@@ -278,6 +282,15 @@ def _format_holding_result(prefix: str, item: dict, watchlist_removed: bool) -> 
     )
 
 
+def _holding_save_failed_message(name: str, status: str, detail: str) -> str:
+    return (
+        f"종목명: **{name}**\n"
+        f"상태: **{status}**\n\n"
+        "안내:\n"
+        f"{detail}"
+    )
+
+
 def _mapped_holding_payload(name: str) -> tuple[str, str, list[str], list[str], list[str], dict | None] | None:
     resolution = analyzer.resolve_ticker(name)
     if not resolution:
@@ -299,18 +312,33 @@ def add_holding(name: str, quantity: int, average_price: float) -> str:
         return _holding_lookup_failed(name)
 
     display_name, ticker, themes, subthemes, non_priority, _ = resolved
-    status, item = storage.upsert_holding(
-        display_name,
-        ticker,
-        quantity,
-        average_price,
-        themes,
-        subthemes,
-        non_priority,
-    )
+    command_log(f"/보유추가 저장 시작: {display_name} / {ticker} / 경로: {storage.json_file_path_text(storage.HOLDINGS_FILE)}")
+    try:
+        status, item = storage.upsert_holding(
+            display_name,
+            ticker,
+            quantity,
+            average_price,
+            themes,
+            subthemes,
+            non_priority,
+            logger=command_log,
+        )
+        verified = storage.verify_holding_saved(display_name, ticker, logger=command_log)
+    except Exception as exc:
+        command_log(f"/보유추가 저장 실패: {display_name} / {ticker} / {exc}")
+        return _holding_save_failed_message(display_name, "저장 실패", f"holdings.json 저장 중 오류가 발생했습니다.\n오류: **{exc}**")
+
+    if not verified:
+        return _holding_save_failed_message(
+            display_name,
+            "저장 검증 실패",
+            "holdings.json에 저장 직후 다시 조회했지만 종목을 찾지 못했습니다.",
+        )
+
     removed = storage.delete_watchlist(ticker) or storage.delete_watchlist(display_name) or storage.delete_watchlist(name)
     prefix = "보유종목 업데이트 완료" if status == "updated" else "보유종목 추가 완료"
-    return _format_holding_result(prefix, item, bool(removed))
+    return _format_holding_result(prefix, verified or item, bool(removed))
 
 
 def buy_watchlist(name: str, quantity: int, average_price: float) -> str:
@@ -331,18 +359,33 @@ def buy_watchlist(name: str, quantity: int, average_price: float) -> str:
             return _holding_lookup_failed(name)
         display_name, ticker, themes, subthemes, non_priority, _ = resolved
 
-    status, holding = storage.upsert_holding(
-        display_name,
-        ticker,
-        quantity,
-        average_price,
-        themes,
-        subthemes,
-        non_priority,
-    )
+    command_log(f"/관심매수 저장 시작: {display_name} / {ticker} / 경로: {storage.json_file_path_text(storage.HOLDINGS_FILE)}")
+    try:
+        status, holding = storage.upsert_holding(
+            display_name,
+            ticker,
+            quantity,
+            average_price,
+            themes,
+            subthemes,
+            non_priority,
+            logger=command_log,
+        )
+        verified = storage.verify_holding_saved(display_name, ticker, logger=command_log)
+    except Exception as exc:
+        command_log(f"/관심매수 저장 실패: {display_name} / {ticker} / {exc}")
+        return _holding_save_failed_message(display_name, "저장 실패", f"holdings.json 저장 중 오류가 발생했습니다.\n오류: **{exc}**")
+
+    if not verified:
+        return _holding_save_failed_message(
+            display_name,
+            "저장 검증 실패",
+            "holdings.json에 저장 직후 다시 조회했지만 종목을 찾지 못했습니다.",
+        )
+
     removed = storage.delete_watchlist(ticker) or storage.delete_watchlist(display_name) or storage.delete_watchlist(name)
     prefix = "관심매수 업데이트 완료" if status == "updated" else "관심매수 완료"
-    return _format_holding_result(prefix, holding, bool(removed))
+    return _format_holding_result(prefix, verified or holding, bool(removed))
 
 
 def delete_holding(query: str) -> str:
@@ -357,8 +400,10 @@ def delete_holding(query: str) -> str:
 
 
 def list_holdings() -> str:
-    storage.prune_watchlist_holdings_overlap()
-    return analyzer.holdings_text()
+    storage.prune_watchlist_holdings_overlap(logger=command_log)
+    items = storage.load_holdings(logger=command_log)
+    command_log(f"/보유목록 holdings.json 읽음: {len(items)}개 / 경로: {storage.json_file_path_text(storage.HOLDINGS_FILE)}")
+    return analyzer.holdings_text(items=items, logger=command_log)
 
 
 def portfolio_check() -> str:

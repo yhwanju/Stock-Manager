@@ -15,7 +15,8 @@ from config import (
 )
 
 
-BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent
+BASE_DIR = PROJECT_ROOT
 Logger = Callable[[str], None] | None
 
 
@@ -32,29 +33,39 @@ def log(logger: Logger, message: str) -> None:
         logger(message)
 
 
+def json_file_path(file_name: str) -> Path:
+    return PROJECT_ROOT / file_name
+
+
+def json_file_path_text(file_name: str) -> str:
+    return str(json_file_path(file_name))
+
+
 def load_json_file(file_name: str, default: Any, *, required: bool = False, logger: Logger = None) -> Any:
-    path = BASE_DIR / file_name
+    path = json_file_path(file_name)
     if not path.exists():
         level = "필수" if required else "선택"
-        log(logger, f"{file_name} 로드 실패: {level} 파일이 없습니다. 기본값으로 진행합니다.")
+        log(logger, f"{file_name} 로드 실패: {level} 파일이 없습니다. 경로: {path}")
         return default
 
     try:
         with path.open("r", encoding="utf-8") as file:
             payload = json.load(file)
     except json.JSONDecodeError as exc:
-        log(logger, f"{file_name} 로드 실패: JSON 파싱 오류 - {exc}. 기본값으로 진행합니다.")
+        log(logger, f"{file_name} 로드 실패: JSON 파싱 오류 - {exc}. 경로: {path}")
         return default
 
-    log(logger, f"{file_name} 로드 성공: {describe_payload(payload)}")
+    log(logger, f"{file_name} 로드 성공: {describe_payload(payload)} / 경로: {path}")
     return payload
 
 
-def save_json_file(file_name: str, payload: Any) -> None:
-    path = BASE_DIR / file_name
+def save_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
+    path = json_file_path(file_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
         file.write("\n")
+    log(logger, f"{file_name} 저장 성공: {describe_payload(payload)} / 경로: {path}")
 
 
 def normalize(value: str) -> str:
@@ -62,19 +73,27 @@ def normalize(value: str) -> str:
 
 
 def load_watchlist(logger: Logger = None) -> list[dict[str, Any]]:
-    return load_json_file(WATCHLIST_FILE, [], required=True, logger=logger)
+    payload = load_json_file(WATCHLIST_FILE, [], required=True, logger=logger)
+    if not isinstance(payload, list):
+        log(logger, f"{WATCHLIST_FILE} 로드 실패: 목록 형식이 아닙니다. 경로: {json_file_path(WATCHLIST_FILE)}")
+        return []
+    return payload
 
 
-def save_watchlist(items: list[dict[str, Any]]) -> None:
-    save_json_file(WATCHLIST_FILE, items)
+def save_watchlist(items: list[dict[str, Any]], logger: Logger = None) -> None:
+    save_json_file(WATCHLIST_FILE, items, logger=logger)
 
 
 def load_holdings(logger: Logger = None) -> list[dict[str, Any]]:
-    return load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
+    payload = load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
+    if not isinstance(payload, list):
+        log(logger, f"{HOLDINGS_FILE} 로드 실패: 목록 형식이 아닙니다. 경로: {json_file_path(HOLDINGS_FILE)}")
+        return []
+    return payload
 
 
-def save_holdings(items: list[dict[str, Any]]) -> None:
-    save_json_file(HOLDINGS_FILE, items)
+def save_holdings(items: list[dict[str, Any]], logger: Logger = None) -> None:
+    save_json_file(HOLDINGS_FILE, items, logger=logger)
 
 
 def load_news_summary(logger: Logger = None) -> dict[str, Any]:
@@ -178,8 +197,8 @@ def item_keys(item: dict[str, Any]) -> set[str]:
 
 
 def prune_watchlist_holdings_overlap(logger: Logger = None) -> list[dict[str, Any]]:
-    watchlist = load_watchlist()
-    holdings = load_holdings()
+    watchlist = load_watchlist(logger=logger)
+    holdings = load_holdings(logger=logger)
     holding_keys: set[str] = set()
     for holding in holdings:
         holding_keys.update(item_keys(holding))
@@ -193,7 +212,7 @@ def prune_watchlist_holdings_overlap(logger: Logger = None) -> list[dict[str, An
             kept.append(item)
 
     if removed:
-        save_watchlist(kept)
+        save_watchlist(kept, logger=logger)
         names = ", ".join(str(item.get("name", "-")) for item in removed)
         log(logger, f"관심/보유 중복 정리 완료: {names}")
     return removed
@@ -243,8 +262,9 @@ def upsert_holding(
     themes: list[str] | None = None,
     subthemes: list[str] | None = None,
     non_priority_themes: list[str] | None = None,
+    logger: Logger = None,
 ) -> tuple[str, dict[str, Any]]:
-    items = load_holdings()
+    items = load_holdings(logger=logger)
     existing = find_item(items, name) or find_item(items, ticker)
     payload = {
         "name": name,
@@ -261,12 +281,22 @@ def upsert_holding(
     if existing:
         existing.clear()
         existing.update(payload)
-        save_holdings(items)
+        save_holdings(items, logger=logger)
         return "updated", existing
 
     items.append(payload)
-    save_holdings(items)
+    save_holdings(items, logger=logger)
     return "added", payload
+
+
+def verify_holding_saved(name: str, ticker: str, logger: Logger = None) -> dict[str, Any] | None:
+    items = load_holdings(logger=logger)
+    target = find_item(items, name) or find_item(items, ticker)
+    if target:
+        log(logger, f"holdings.json 저장 검증 성공: {target.get('name', name)} / {target.get('ticker', ticker)} / 총 {len(items)}개")
+    else:
+        log(logger, f"holdings.json 저장 검증 실패: {name} / {ticker} / 총 {len(items)}개 / 경로: {json_file_path(HOLDINGS_FILE)}")
+    return target
 
 
 def delete_holding(query: str) -> dict[str, Any] | None:
