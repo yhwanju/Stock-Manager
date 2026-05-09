@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import analyzer
 import storage
+from config import KST
 
 
 def command_log(message: str) -> None:
@@ -37,11 +40,24 @@ def help_text() -> str:
 /관심테마수정 종목명 테마
 → 관심/보유종목의 테마를 수정합니다. 예: /관심테마수정 풍산 원자재,방산
 
-/관심매수 종목명 수량 평단
+/관심매수 종목명 수량 매수가
 → 관심종목을 보유종목으로 이동하거나 자동 매핑으로 추가합니다. 예: /관심매수 HK이노엔 50 49500
 
-/보유추가 종목명 수량 평단
-→ 보유종목을 추가하고 관심종목에서는 자동 제외합니다. 예: /보유추가 HK이노엔 50 49500
+/보유추가 종목명 수량 매수가
+→ 신규매수 또는 추가매수를 반영합니다. 예: /보유추가 풍산 27 97888
+
+/분할매도 종목명 수량 매도가
+→ 보유 수량을 줄이고 실현손익을 기록합니다. 예: /분할매도 풍산 10 105000
+
+/전량매도 종목명 매도가
+→ 전체 수량을 매도 처리하고 보유목록에서 제거합니다. 예: /전량매도 풍산 105000
+
+/보유수정 종목명 수량 평단
+→ 오류 정정용으로 수량과 평단을 강제 수정합니다. 예: /보유수정 풍산 27 97888
+
+/매매이력
+/매매이력 종목명
+→ 최근 매매이력 10건을 보여줍니다.
 
 평단 기준
 → 한국주식은 KRW, 미국주식은 USD 기준입니다. 원화/달러 자동 환산은 하지 않습니다.
@@ -291,6 +307,79 @@ def _holding_save_failed_message(name: str, status: str, detail: str) -> str:
     )
 
 
+def _format_signed_money(value: float | int | None, ticker: str) -> str:
+    if value is None:
+        return "-"
+    numeric = float(value)
+    sign = "+" if numeric > 0 else "-" if numeric < 0 else ""
+    absolute = abs(numeric)
+    if analyzer.is_korean_stock_ticker(ticker):
+        return f"{sign}{absolute:,.0f}원"
+    return f"{sign}${absolute:,.2f}"
+
+
+def _format_quantity_price(quantity: int, price: float, ticker: str) -> str:
+    return f"{int(quantity):,}주 / {analyzer.format_price_for_ticker(float(price), ticker)}"
+
+
+def _trade_now() -> str:
+    return datetime.now(KST).isoformat(timespec="seconds")
+
+
+def _trade_entry(
+    trade_type: str,
+    item: dict,
+    quantity: int,
+    price: float,
+    avg_price_before: float | None,
+    avg_price_after: float | None,
+    realized_profit: float = 0.0,
+    realized_return_pct: float = 0.0,
+    remaining_quantity: int = 0,
+    memo: str = "",
+) -> dict:
+    return {
+        "date": _trade_now(),
+        "type": trade_type,
+        "name": item.get("name", "-"),
+        "ticker": item.get("ticker", "-"),
+        "quantity": int(quantity),
+        "price": float(price),
+        "avg_price_before": float(avg_price_before) if avg_price_before is not None else None,
+        "avg_price_after": float(avg_price_after) if avg_price_after is not None else None,
+        "realized_profit": float(realized_profit),
+        "realized_return_pct": float(realized_return_pct),
+        "remaining_quantity": int(remaining_quantity),
+        "memo": memo,
+    }
+
+
+def _record_trade_with_verification(entry: dict) -> bool:
+    storage.record_trade(entry, logger=command_log)
+    return storage.verify_trade_saved(entry, logger=command_log)
+
+
+def _find_holding_for_query(query: str) -> tuple[list[dict], dict | None]:
+    holdings = storage.load_holdings(logger=command_log)
+    item = storage.find_item(holdings, query)
+    if item:
+        return holdings, item
+
+    resolution = analyzer.resolve_ticker(query)
+    if resolution:
+        item = storage.find_item(holdings, resolution.ticker) or storage.find_item(holdings, resolution.name)
+    return holdings, item
+
+
+def _holding_not_found_message(query: str) -> str:
+    return (
+        f"종목명: **{query}**\n"
+        "상태: **보유종목 없음**\n\n"
+        "안내:\n"
+        "/보유목록에서 현재 보유 중인 종목명을 확인해주세요."
+    )
+
+
 def _mapped_holding_payload(name: str) -> tuple[str, str, list[str], list[str], list[str], dict | None] | None:
     resolution = analyzer.resolve_ticker(name)
     if not resolution:
@@ -314,7 +403,7 @@ def add_holding(name: str, quantity: int, average_price: float) -> str:
     display_name, ticker, themes, subthemes, non_priority, _ = resolved
     command_log(f"/보유추가 저장 시작: {display_name} / {ticker} / 경로: {storage.json_file_path_text(storage.HOLDINGS_FILE)}")
     try:
-        status, item = storage.upsert_holding(
+        status, item, before = storage.buy_holding(
             display_name,
             ticker,
             quantity,
@@ -336,9 +425,40 @@ def add_holding(name: str, quantity: int, average_price: float) -> str:
             "holdings.json에 저장 직후 다시 조회했지만 종목을 찾지 못했습니다.",
         )
 
+    old_quantity = int(before.get("quantity", 0)) if before else 0
+    old_average_price = float(before.get("avg_price", before.get("average_price", 0))) if before else None
+    current_quantity = int(verified["quantity"])
+    current_average_price = float(verified.get("avg_price", verified.get("average_price", 0)))
+    trade = _trade_entry(
+        "BUY",
+        verified,
+        int(quantity),
+        float(average_price),
+        old_average_price,
+        current_average_price,
+        remaining_quantity=current_quantity,
+        memo="추가매수" if before else "신규매수",
+    )
+    if not _record_trade_with_verification(trade):
+        return _holding_save_failed_message(display_name, "매매이력 저장 검증 실패", "trade_history.json에 BUY 이력을 저장했지만 다시 조회하지 못했습니다.")
+
     removed = storage.delete_watchlist(ticker) or storage.delete_watchlist(display_name) or storage.delete_watchlist(name)
-    prefix = "보유종목 업데이트 완료" if status == "updated" else "보유종목 추가 완료"
-    return _format_holding_result(prefix, verified or item, bool(removed))
+    watchlist_status = "자동 제외 완료" if removed else "제외 대상 없음"
+
+    if status == "additional_buy":
+        return (
+            f"종목명: **{verified['name']}**\n"
+            "상태: **추가매수 반영 완료**\n"
+            f"관심종목 처리: **{watchlist_status}**\n\n"
+            "기존:\n"
+            f"{_format_quantity_price(old_quantity, old_average_price or 0, ticker)}\n\n"
+            "추가:\n"
+            f"{_format_quantity_price(int(quantity), float(average_price), ticker)}\n\n"
+            "현재:\n"
+            f"{_format_quantity_price(current_quantity, current_average_price, ticker)}"
+        )
+
+    return _format_holding_result("신규 보유종목 추가 완료", verified or item, bool(removed))
 
 
 def buy_watchlist(name: str, quantity: int, average_price: float) -> str:
@@ -361,7 +481,7 @@ def buy_watchlist(name: str, quantity: int, average_price: float) -> str:
 
     command_log(f"/관심매수 저장 시작: {display_name} / {ticker} / 경로: {storage.json_file_path_text(storage.HOLDINGS_FILE)}")
     try:
-        status, holding = storage.upsert_holding(
+        status, holding, before = storage.buy_holding(
             display_name,
             ticker,
             quantity,
@@ -383,9 +503,242 @@ def buy_watchlist(name: str, quantity: int, average_price: float) -> str:
             "holdings.json에 저장 직후 다시 조회했지만 종목을 찾지 못했습니다.",
         )
 
+    current_average_price = float(verified.get("avg_price", verified.get("average_price", 0)))
+    trade = _trade_entry(
+        "BUY",
+        verified,
+        int(quantity),
+        float(average_price),
+        float(before.get("avg_price", before.get("average_price", 0))) if before else None,
+        current_average_price,
+        remaining_quantity=int(verified["quantity"]),
+        memo="관심매수 추가매수" if status == "additional_buy" else "관심매수 신규매수",
+    )
+    if not _record_trade_with_verification(trade):
+        return _holding_save_failed_message(display_name, "매매이력 저장 검증 실패", "trade_history.json에 BUY 이력을 저장했지만 다시 조회하지 못했습니다.")
+
     removed = storage.delete_watchlist(ticker) or storage.delete_watchlist(display_name) or storage.delete_watchlist(name)
-    prefix = "관심매수 업데이트 완료" if status == "updated" else "관심매수 완료"
+    prefix = "관심매수 추가매수 반영 완료" if status == "additional_buy" else "관심매수 완료"
     return _format_holding_result(prefix, verified or holding, bool(removed))
+
+
+def partial_sell(name: str, quantity: int, sell_price: float) -> str:
+    holdings, item = _find_holding_for_query(name)
+    if not item:
+        return _holding_not_found_message(name)
+
+    sell_quantity = int(quantity)
+    held_quantity = int(item.get("quantity", 0) or 0)
+    ticker = str(item.get("ticker", ""))
+    avg_price = float(item.get("avg_price", item.get("average_price", 0)) or 0)
+    sell_price_value = float(sell_price)
+    if sell_quantity <= 0:
+        return _holding_save_failed_message(str(item.get("name", name)), "매도 실패", "매도 수량은 1 이상이어야 합니다.")
+    if sell_price_value <= 0:
+        return _holding_save_failed_message(str(item.get("name", name)), "매도 실패", "매도가는 0보다 커야 합니다.")
+    if sell_quantity > held_quantity:
+        return (
+            f"종목명: **{item.get('name', name)}**\n"
+            "상태: **매도 수량 초과**\n\n"
+            f"보유수량: **{held_quantity:,}주**\n"
+            f"요청수량: **{sell_quantity:,}주**"
+        )
+
+    before = item.copy()
+    remaining_quantity = held_quantity - sell_quantity
+    realized_profit = (sell_price_value - avg_price) * sell_quantity
+    realized_return_pct = ((sell_price_value - avg_price) / avg_price) * 100 if avg_price else 0.0
+
+    if remaining_quantity > 0:
+        item["quantity"] = remaining_quantity
+        storage.save_holdings(holdings, logger=command_log)
+        holding_verified = storage.verify_holding_saved(str(item.get("name", name)), ticker, logger=command_log)
+    else:
+        storage.save_holdings([holding for holding in holdings if holding is not item], logger=command_log)
+        holding_verified = storage.verify_holding_removed(str(item.get("name", name)), ticker, logger=command_log)
+
+    if not holding_verified:
+        return _holding_save_failed_message(str(before.get("name", name)), "저장 검증 실패", "매도 후 holdings.json 검증에 실패했습니다.")
+
+    trade_type = "PARTIAL_SELL" if remaining_quantity > 0 else "FULL_SELL"
+    trade = _trade_entry(
+        trade_type,
+        before,
+        sell_quantity,
+        sell_price_value,
+        avg_price,
+        avg_price if remaining_quantity > 0 else None,
+        realized_profit=realized_profit,
+        realized_return_pct=realized_return_pct,
+        remaining_quantity=remaining_quantity,
+        memo="분할매도" if remaining_quantity > 0 else "분할매도 후 잔여수량 0",
+    )
+    if not _record_trade_with_verification(trade):
+        return _holding_save_failed_message(str(before.get("name", name)), "매매이력 저장 검증 실패", "trade_history.json에 매도 이력을 저장했지만 다시 조회하지 못했습니다.")
+
+    status = "분할매도 반영 완료" if remaining_quantity > 0 else "전량매도 완료"
+    remaining_text = (
+        f"{remaining_quantity:,}주 / 평단 {analyzer.format_price_for_ticker(avg_price, ticker)}"
+        if remaining_quantity > 0
+        else "보유목록에서 제거 완료"
+    )
+    return (
+        f"종목명: **{before.get('name', name)}**\n"
+        f"상태: **{status}**\n\n"
+        "매도:\n"
+        f"{_format_quantity_price(sell_quantity, sell_price_value, ticker)}\n\n"
+        "실현손익:\n"
+        f"{_format_signed_money(realized_profit, ticker)} / {analyzer.format_pct(realized_return_pct)}\n\n"
+        "잔여:\n"
+        f"{remaining_text}"
+    )
+
+
+def full_sell(name: str, sell_price: float) -> str:
+    holdings, item = _find_holding_for_query(name)
+    if not item:
+        return _holding_not_found_message(name)
+
+    quantity = int(item.get("quantity", 0) or 0)
+    if quantity <= 0:
+        return _holding_save_failed_message(str(item.get("name", name)), "전량매도 실패", "보유 수량이 없습니다.")
+
+    ticker = str(item.get("ticker", ""))
+    avg_price = float(item.get("avg_price", item.get("average_price", 0)) or 0)
+    sell_price_value = float(sell_price)
+    if sell_price_value <= 0:
+        return _holding_save_failed_message(str(item.get("name", name)), "전량매도 실패", "매도가는 0보다 커야 합니다.")
+
+    before = item.copy()
+    realized_profit = (sell_price_value - avg_price) * quantity
+    realized_return_pct = ((sell_price_value - avg_price) / avg_price) * 100 if avg_price else 0.0
+    storage.save_holdings([holding for holding in holdings if holding is not item], logger=command_log)
+    if not storage.verify_holding_removed(str(before.get("name", name)), ticker, logger=command_log):
+        return _holding_save_failed_message(str(before.get("name", name)), "저장 검증 실패", "전량매도 후 holdings.json 제거 검증에 실패했습니다.")
+
+    trade = _trade_entry(
+        "FULL_SELL",
+        before,
+        quantity,
+        sell_price_value,
+        avg_price,
+        None,
+        realized_profit=realized_profit,
+        realized_return_pct=realized_return_pct,
+        remaining_quantity=0,
+        memo="전량매도",
+    )
+    if not _record_trade_with_verification(trade):
+        return _holding_save_failed_message(str(before.get("name", name)), "매매이력 저장 검증 실패", "trade_history.json에 전량매도 이력을 저장했지만 다시 조회하지 못했습니다.")
+
+    return (
+        f"종목명: **{before.get('name', name)}**\n"
+        "상태: **전량매도 완료**\n\n"
+        "매도:\n"
+        f"{_format_quantity_price(quantity, sell_price_value, ticker)}\n\n"
+        "실현손익:\n"
+        f"{_format_signed_money(realized_profit, ticker)} / {analyzer.format_pct(realized_return_pct)}\n\n"
+        "보유상태:\n"
+        "보유목록에서 제거 완료"
+    )
+
+
+def edit_holding(name: str, quantity: int, average_price: float) -> str:
+    holdings, existing = _find_holding_for_query(name)
+    if existing:
+        display_name = str(existing.get("name", name))
+        ticker = str(existing.get("ticker", ""))
+        themes, subthemes, non_priority = analyzer.normalize_stock_theme_fields(existing)
+        before = existing.copy()
+    else:
+        resolved = _mapped_holding_payload(name)
+        if not resolved:
+            return _holding_lookup_failed(name)
+        display_name, ticker, themes, subthemes, non_priority, _ = resolved
+        before = None
+
+    try:
+        status, item, _ = storage.replace_holding(
+            display_name,
+            ticker,
+            quantity,
+            average_price,
+            themes,
+            subthemes,
+            non_priority,
+            logger=command_log,
+        )
+        verified = storage.verify_holding_saved(display_name, ticker, logger=command_log)
+    except Exception as exc:
+        return _holding_save_failed_message(display_name, "보유수정 실패", f"holdings.json 수정 중 오류가 발생했습니다.\n오류: **{exc}**")
+
+    if not verified:
+        return _holding_save_failed_message(display_name, "저장 검증 실패", "보유수정 후 holdings.json 검증에 실패했습니다.")
+
+    history_count = len(storage.load_trade_history(logger=command_log))
+    command_log(f"/보유수정 trade_history.json 읽음: {history_count}건 / 수동수정은 이력 미기록")
+
+    before_text = (
+        f"{int(before.get('quantity', 0)):,}주 / {analyzer.format_price_for_ticker(float(before.get('avg_price', before.get('average_price', 0))), ticker)}"
+        if before
+        else "기존 보유 없음"
+    )
+    current_text = _format_quantity_price(int(verified["quantity"]), float(verified.get("avg_price", verified.get("average_price", 0))), ticker)
+    _ = status
+    _ = item
+    _ = holdings
+    return (
+        f"종목명: **{verified['name']}**\n"
+        "상태: **보유수정 완료**\n"
+        "매매이력 기록: **안 함**\n\n"
+        "기존:\n"
+        f"{before_text}\n\n"
+        "현재:\n"
+        f"{current_text}"
+    )
+
+
+def trade_history(query: str | None = None) -> str:
+    history = storage.load_trade_history(logger=command_log)
+    filtered = history
+    title = "전체"
+    if query:
+        resolution = analyzer.resolve_ticker(query)
+        query_keys = {storage.normalize(query)}
+        if resolution:
+            query_keys.update({storage.normalize(resolution.name), storage.normalize(resolution.ticker)})
+            title = resolution.name
+        else:
+            title = query
+        filtered = [
+            item for item in history
+            if storage.normalize(str(item.get("name", ""))) in query_keys
+            or storage.normalize(str(item.get("ticker", ""))) in query_keys
+        ]
+
+    lines = analyzer.section("🧾 매매이력")
+    lines.append(f"조회대상: **{title}**")
+    lines.append("")
+    if not filtered:
+        lines.append("매매이력 없음")
+        return "\n".join(lines).strip()
+
+    for item in list(reversed(filtered))[:10]:
+        ticker = str(item.get("ticker", ""))
+        realized_profit = float(item.get("realized_profit", 0) or 0)
+        realized_return_pct = float(item.get("realized_return_pct", 0) or 0)
+        lines.append(f"종목명: **{item.get('name', '-')}**")
+        lines.append(f"구분: **{item.get('type', '-')}**")
+        lines.append(f"일시: **{item.get('date', '-')}**")
+        lines.append(f"수량/가격: **{_format_quantity_price(int(item.get('quantity', 0) or 0), float(item.get('price', 0) or 0), ticker)}**")
+        if item.get("type") in {"PARTIAL_SELL", "FULL_SELL"}:
+            lines.append(f"실현손익: **{_format_signed_money(realized_profit, ticker)} / {analyzer.format_pct(realized_return_pct)}**")
+        lines.append(f"잔여수량: **{int(item.get('remaining_quantity', 0) or 0):,}주**")
+        memo = str(item.get("memo", "") or "-")
+        lines.append(f"메모: **{memo}**")
+        lines.append("")
+
+    return "\n".join(lines).strip()
 
 
 def delete_holding(query: str) -> str:

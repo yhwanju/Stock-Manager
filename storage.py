@@ -11,6 +11,7 @@ from config import (
     THEME_CONFIG_FILE,
     THEME_MAP_FILE,
     TICKER_MAP_FILE,
+    TRADE_HISTORY_FILE,
     WATCHLIST_FILE,
 )
 
@@ -94,6 +95,18 @@ def load_holdings(logger: Logger = None) -> list[dict[str, Any]]:
 
 def save_holdings(items: list[dict[str, Any]], logger: Logger = None) -> None:
     save_json_file(HOLDINGS_FILE, items, logger=logger)
+
+
+def load_trade_history(logger: Logger = None) -> list[dict[str, Any]]:
+    payload = load_json_file(TRADE_HISTORY_FILE, [], logger=logger)
+    if not isinstance(payload, list):
+        log(logger, f"{TRADE_HISTORY_FILE} 로드 실패: 목록 형식이 아닙니다. 경로: {json_file_path(TRADE_HISTORY_FILE)}")
+        return []
+    return payload
+
+
+def save_trade_history(items: list[dict[str, Any]], logger: Logger = None) -> None:
+    save_json_file(TRADE_HISTORY_FILE, items, logger=logger)
 
 
 def load_news_summary(logger: Logger = None) -> dict[str, Any]:
@@ -264,13 +277,66 @@ def upsert_holding(
     non_priority_themes: list[str] | None = None,
     logger: Logger = None,
 ) -> tuple[str, dict[str, Any]]:
+    status, item, _ = buy_holding(
+        name,
+        ticker,
+        quantity,
+        average_price,
+        themes,
+        subthemes,
+        non_priority_themes,
+        logger=logger,
+    )
+    return ("updated" if status == "additional_buy" else "added"), item
+
+
+def buy_holding(
+    name: str,
+    ticker: str,
+    quantity: int,
+    buy_price: float,
+    themes: list[str] | None = None,
+    subthemes: list[str] | None = None,
+    non_priority_themes: list[str] | None = None,
+    logger: Logger = None,
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
     items = load_holdings(logger=logger)
-    existing = find_item(items, name) or find_item(items, ticker)
-    payload = {
+    existing = find_item(items, ticker) or find_item(items, name)
+    buy_quantity = int(quantity)
+    buy_price_value = float(buy_price)
+    if buy_quantity <= 0:
+        raise ValueError("수량은 1 이상이어야 합니다.")
+    if buy_price_value <= 0:
+        raise ValueError("매수가는 0보다 커야 합니다.")
+
+    if existing:
+        before = existing.copy()
+        old_quantity = int(existing.get("quantity", 0) or 0)
+        old_average_price = float(existing.get("avg_price", existing.get("average_price", 0)) or 0)
+        new_quantity = old_quantity + buy_quantity
+        new_average_price = (
+            (old_quantity * old_average_price) + (buy_quantity * buy_price_value)
+        ) / new_quantity
+
+        existing["name"] = str(existing.get("name") or name)
+        existing["ticker"] = str(existing.get("ticker") or ticker)
+        existing["quantity"] = new_quantity
+        existing["avg_price"] = new_average_price
+        if themes is not None and not existing.get("themes"):
+            existing["themes"] = themes
+        if subthemes is not None and not existing.get("subthemes"):
+            existing["subthemes"] = subthemes
+        if non_priority_themes and not existing.get("non_priority_themes"):
+            existing["non_priority_themes"] = non_priority_themes
+
+        save_holdings(items, logger=logger)
+        return "additional_buy", existing, before
+
+    payload: dict[str, Any] = {
         "name": name,
         "ticker": ticker,
-        "quantity": int(quantity),
-        "avg_price": float(average_price),
+        "quantity": buy_quantity,
+        "avg_price": buy_price_value,
     }
     if themes is not None:
         payload["themes"] = themes
@@ -278,15 +344,51 @@ def upsert_holding(
         payload["subthemes"] = subthemes
     if non_priority_themes:
         payload["non_priority_themes"] = non_priority_themes
-    if existing:
-        existing.clear()
-        existing.update(payload)
-        save_holdings(items, logger=logger)
-        return "updated", existing
 
     items.append(payload)
     save_holdings(items, logger=logger)
-    return "added", payload
+    return "new_buy", payload, None
+
+
+def replace_holding(
+    name: str,
+    ticker: str,
+    quantity: int,
+    average_price: float,
+    themes: list[str] | None = None,
+    subthemes: list[str] | None = None,
+    non_priority_themes: list[str] | None = None,
+    logger: Logger = None,
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    items = load_holdings(logger=logger)
+    existing = find_item(items, ticker) or find_item(items, name)
+    payload: dict[str, Any] = {
+        "name": name,
+        "ticker": ticker,
+        "quantity": int(quantity),
+        "avg_price": float(average_price),
+    }
+    if payload["quantity"] <= 0:
+        raise ValueError("수량은 1 이상이어야 합니다.")
+    if payload["avg_price"] <= 0:
+        raise ValueError("평단은 0보다 커야 합니다.")
+    if themes is not None:
+        payload["themes"] = themes
+    if subthemes is not None:
+        payload["subthemes"] = subthemes
+    if non_priority_themes:
+        payload["non_priority_themes"] = non_priority_themes
+
+    if existing:
+        before = existing.copy()
+        existing.clear()
+        existing.update(payload)
+        save_holdings(items, logger=logger)
+        return "manual_update", existing, before
+
+    items.append(payload)
+    save_holdings(items, logger=logger)
+    return "manual_add", payload, None
 
 
 def verify_holding_saved(name: str, ticker: str, logger: Logger = None) -> dict[str, Any] | None:
@@ -297,6 +399,44 @@ def verify_holding_saved(name: str, ticker: str, logger: Logger = None) -> dict[
     else:
         log(logger, f"holdings.json 저장 검증 실패: {name} / {ticker} / 총 {len(items)}개 / 경로: {json_file_path(HOLDINGS_FILE)}")
     return target
+
+
+def verify_holding_removed(name: str, ticker: str, logger: Logger = None) -> bool:
+    items = load_holdings(logger=logger)
+    target = find_item(items, name) or find_item(items, ticker)
+    removed = target is None
+    if removed:
+        log(logger, f"holdings.json 제거 검증 성공: {name} / {ticker} / 총 {len(items)}개")
+    else:
+        log(logger, f"holdings.json 제거 검증 실패: {name} / {ticker} / 총 {len(items)}개")
+    return removed
+
+
+def record_trade(entry: dict[str, Any], logger: Logger = None) -> dict[str, Any]:
+    history = load_trade_history(logger=logger)
+    history.append(entry)
+    save_trade_history(history, logger=logger)
+    return entry
+
+
+def verify_trade_saved(entry: dict[str, Any], logger: Logger = None) -> bool:
+    history = load_trade_history(logger=logger)
+    target = None
+    for item in reversed(history):
+        if (
+            item.get("date") == entry.get("date")
+            and item.get("type") == entry.get("type")
+            and item.get("ticker") == entry.get("ticker")
+            and item.get("quantity") == entry.get("quantity")
+            and item.get("price") == entry.get("price")
+        ):
+            target = item
+            break
+    if target:
+        log(logger, f"{TRADE_HISTORY_FILE} 저장 검증 성공: {entry.get('type')} / {entry.get('name')} / 총 {len(history)}건")
+        return True
+    log(logger, f"{TRADE_HISTORY_FILE} 저장 검증 실패: {entry.get('type')} / {entry.get('name')} / 총 {len(history)}건")
+    return False
 
 
 def delete_holding(query: str) -> dict[str, Any] | None:

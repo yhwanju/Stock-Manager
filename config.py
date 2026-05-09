@@ -8,6 +8,7 @@ BOT_TOKEN_ENV_NAME = "DISCORD_BOT_TOKEN"
 
 WATCHLIST_FILE = "watchlist.json"
 HOLDINGS_FILE = "holdings.json"
+TRADE_HISTORY_FILE = "trade_history.json"
 NEWS_SUMMARY_FILE = "news_summary.json"
 ALERTS_FILE = "alerts.json"
 TICKER_MAP_FILE = "ticker_map.json"

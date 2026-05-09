@@ -126,6 +126,17 @@ def format_price_for_ticker(value: float | int | None, ticker: str | None) -> st
     return f"${float(value):,.2f}"
 
 
+def format_signed_price_for_ticker(value: float | int | None, ticker: str | None) -> str:
+    if value is None or not math.isfinite(float(value)):
+        return "-"
+    numeric = float(value)
+    sign = "+" if numeric > 0 else "-" if numeric < 0 else ""
+    absolute = abs(numeric)
+    if is_korean_stock_ticker(ticker):
+        return f"{sign}{absolute:,.0f}원"
+    return f"{sign}${absolute:,.2f}"
+
+
 def format_pct(value: float | None) -> str:
     if value is None or not math.isfinite(float(value)):
         return "-"
@@ -134,6 +145,16 @@ def format_pct(value: float | None) -> str:
 
 def holding_average_price(holding: dict[str, Any]) -> float:
     return float(holding.get("avg_price", holding.get("average_price", 0)) or 0)
+
+
+def realized_profit_map(trade_history: list[dict[str, Any]]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for trade in trade_history:
+        ticker = str(trade.get("ticker", ""))
+        if not ticker:
+            continue
+        totals[ticker] = totals.get(ticker, 0.0) + float(trade.get("realized_profit", 0) or 0)
+    return totals
 
 
 def bold(value: Any) -> str:
@@ -1457,15 +1478,34 @@ def holdings_text(items: list[dict[str, Any]] | None = None, logger: Logger = No
         storage.prune_watchlist_holdings_overlap(logger=logger)
         items = storage.load_holdings(logger=logger)
     log(logger, f"보유목록 출력 준비: holdings.json {len(items)}개 / 경로: {storage.json_file_path_text(storage.HOLDINGS_FILE)}")
+    realized_totals = realized_profit_map(storage.load_trade_history(logger=logger))
     lines = section("💼 보유목록")
     if not items:
         lines.append("보유종목 없음")
     for item in items:
+        ticker = str(item.get("ticker", ""))
+        quantity = int(item.get("quantity", 0))
+        average_price = holding_average_price(item)
+        analysis = analyze_stock(item, [], "횡보장")
+        current_price = analysis.current_price
+        valuation_profit = None
+        valuation_return_pct = None
+        if current_price and average_price:
+            valuation_profit = (current_price - average_price) * quantity
+            valuation_return_pct = ((current_price / average_price) - 1) * 100
+
         lines.append(f"종목명: {bold(item.get('name', '-'))}")
-        lines.append(f"티커: {bold(item.get('ticker', '-'))}")
-        quantity_text = f"{int(item.get('quantity', 0)):,}주"
+        lines.append(f"티커: {bold(ticker or '-')}")
+        quantity_text = f"{quantity:,}주"
         lines.append(f"보유수량: {bold(quantity_text)}")
-        lines.append(f"평단: {bold(format_price_for_ticker(holding_average_price(item), str(item.get('ticker', ''))))}")
+        lines.append(f"평단: {bold(format_price_for_ticker(average_price, ticker))}")
+        lines.append(f"현재가: {bold(format_price_for_ticker(current_price, ticker))}")
+        valuation_text = f"{format_signed_price_for_ticker(valuation_profit, ticker)} / {format_pct(valuation_return_pct)}"
+        lines.append(f"평가손익: {bold(valuation_text)}")
+        realized_text = format_signed_price_for_ticker(realized_totals.get(ticker, 0.0), ticker)
+        lines.append(f"실현손익 누적: {bold(realized_text)}")
+        if analysis.error:
+            lines.append(f"시세 오류: {analysis.error}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -1473,18 +1513,23 @@ def holdings_text(items: list[dict[str, Any]] | None = None, logger: Logger = No
 def portfolio_check_report() -> str:
     context = build_context()
     holding_analyses = analyze_holdings(context)
+    realized_totals = realized_profit_map(storage.load_trade_history())
     total_value = 0.0
-    rows: list[tuple[dict[str, Any], StockAnalysis, float, float | None]] = []
+    rows: list[tuple[dict[str, Any], StockAnalysis, float, float | None, float | None, float]] = []
     theme_values: dict[str, float] = {}
     for holding in context.holdings:
         analysis = holding_analyses[holding["ticker"]]
         quantity = int(holding["quantity"])
+        average_price = holding_average_price(holding)
         value = (analysis.current_price or 0) * quantity
         total_value += value
+        valuation_profit = None
         profit_pct = None
-        if analysis.current_price:
-            profit_pct = ((analysis.current_price / holding_average_price(holding)) - 1) * 100
-        rows.append((holding, analysis, value, profit_pct))
+        if analysis.current_price and average_price:
+            valuation_profit = (analysis.current_price - average_price) * quantity
+            profit_pct = ((analysis.current_price / average_price) - 1) * 100
+        realized_profit = realized_totals.get(str(holding.get("ticker", "")), 0.0)
+        rows.append((holding, analysis, value, valuation_profit, profit_pct, realized_profit))
         themes, _, _ = normalize_stock_theme_fields(holding, context.theme_config)
         for theme in themes or ["미분류"]:
             theme_values[theme] = theme_values.get(theme, 0.0) + value
@@ -1494,12 +1539,15 @@ def portfolio_check_report() -> str:
         lines.append("보유종목 없음")
         return "\n".join(lines).strip()
 
-    for holding, analysis, value, profit_pct in rows:
+    for holding, analysis, value, valuation_profit, profit_pct, realized_profit in rows:
+        ticker = str(holding.get("ticker", ""))
         weight = (value / total_value * 100) if total_value else 0
         action, _, _ = holding_action(analysis, int(holding["quantity"]), holding_average_price(holding), context.market.state)
         lines.append(f"종목명: {bold(holding['name'])}")
-        lines.append(f"평가금액: {bold(format_krw(value))}")
-        lines.append(f"수익률: {bold(format_pct(profit_pct))}")
+        lines.append(f"평가금액: {bold(format_price_for_ticker(value, ticker))}")
+        valuation_text = f"{format_signed_price_for_ticker(valuation_profit, ticker)} / {format_pct(profit_pct)}"
+        lines.append(f"평가손익: {bold(valuation_text)}")
+        lines.append(f"실현손익 누적: {bold(format_signed_price_for_ticker(realized_profit, ticker))}")
         weight_text = f"{weight:.1f}%"
         lines.append(f"비중: {bold(weight_text)}")
         lines.append(f"액션: {bold(action)}")
