@@ -110,7 +110,12 @@ def main() -> int:
     elif args.force_weekend:
         log("--force-weekend 옵션 사용: 주말 체크를 건너뛰고 진행합니다.")
 
-    reports = build_daily_reports(logger=log)
+    webhook_url = os.getenv(WEBHOOK_ENV_NAME)
+    if not dry_run and not webhook_url:
+        log(f"Discord 발송 실패: {WEBHOOK_ENV_NAME} 환경 변수가 설정되어 있지 않습니다.")
+        raise RuntimeError(f"{WEBHOOK_ENV_NAME} 환경 변수가 설정되어 있지 않습니다.")
+
+    reports = build_daily_reports(logger=log, record_recommendations=not dry_run)
 
     if dry_run:
         log("발송 스킵: DRY_RUN 모드입니다.")
@@ -119,11 +124,6 @@ def main() -> int:
         print("\n===== 메시지 2: 보유종목 관리 =====\n", flush=True)
         print(reports[1], flush=True)
         return 0
-
-    webhook_url = os.getenv(WEBHOOK_ENV_NAME)
-    if not webhook_url:
-        log(f"Discord 발송 실패: {WEBHOOK_ENV_NAME} 환경 변수가 설정되어 있지 않습니다.")
-        raise RuntimeError(f"{WEBHOOK_ENV_NAME} 환경 변수가 설정되어 있지 않습니다.")
 
     log("Discord 발송 시작")
     send_to_discord(reports, webhook_url)

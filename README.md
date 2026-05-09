@@ -8,14 +8,16 @@
 - `discord_bot.py`: Discord slash command 질문봇 실행
 - `bot_commands.py`: 질문봇 명령어 처리
 - `analyzer.py`: 정기 리포트와 질문봇이 공유하는 분석 로직
-- `storage.py`: `watchlist.json`, `holdings.json`, `trade_history.json`, `news_summary.json`, `alerts.json`, 매핑 파일 읽기/쓰기
+- `storage.py`: Google Sheets 우선 저장소 라우팅, 로컬 JSON 캐시/fallback 읽기/쓰기
+- `sheets_storage.py`: Google Sheets `watchlist`, `holdings`, `trade_history`, `recommendation_history` 읽기/쓰기
 - `config.py`: 공통 설정, 시장 상태별 전략, 테마 키워드
 - `theme_config.json`: 우선 분석 대분류 테마와 세부 태그, 대표종목
 - `ticker_map.json`: 종목명과 티커 자동 매핑
 - `theme_map.json`: 종목명과 테마/세부태그 자동 매핑
-- `watchlist.json`: 관심종목
-- `holdings.json`: 보유종목
-- `trade_history.json`: 매매이력
+- `watchlist.json`: 관심종목 로컬 캐시/fallback
+- `holdings.json`: 보유종목 로컬 캐시/fallback
+- `trade_history.json`: 매매이력 로컬 캐시/fallback
+- `recommendation_history.json`: 추천이력 로컬 캐시/fallback
 - `alerts.json`: 목표가/손절가 알림 조건
 - `news_summary.json`: 뉴스봇 연동 요약 파일
 - `.github/workflows/stock-manager.yml`: GitHub Actions 스케줄
@@ -97,6 +99,8 @@ Environment Variables:
 ```text
 DISCORD_BOT_TOKEN=Discord 봇 토큰
 DISCORD_GUILD_ID=테스트 서버 ID 선택
+GOOGLE_SERVICE_ACCOUNT_JSON=Google 서비스 계정 JSON 전체 문자열
+GOOGLE_SHEETS_SPREADSHEET_ID=Google Sheets 스프레드시트 ID
 PORT=Render가 자동 설정
 ```
 
@@ -109,6 +113,30 @@ Slash command를 바로 테스트하려면 `DISCORD_GUILD_ID`를 테스트 서�
 /분할매도 엔비디아 3 135
 /매매이력 엔비디아
 ```
+
+## Google Sheets 저장소
+
+Render, Termux, PC가 같은 데이터를 보도록 Google Sheets를 공용 저장소로 사용합니다. 아래 환경변수가 모두 있으면 `watchlist`, `holdings`, `trade_history`, `recommendation_history`는 Google Sheets를 먼저 읽고 씁니다. 저장 성공 후 같은 내용을 로컬 JSON에도 캐시합니다. Google Sheets가 비어 있고 로컬 JSON에 기존 데이터가 있으면 첫 로드 때 시트로 초기 동기화합니다. 환경변수가 없거나 시트 접근에 실패하면 로컬 JSON fallback을 사용합니다.
+
+```text
+GOOGLE_SERVICE_ACCOUNT_JSON=서비스 계정 JSON 전체 문자열
+GOOGLE_SHEETS_SPREADSHEET_ID=스프레드시트 ID
+```
+
+스프레드시트에는 아래 시트가 필요합니다. 없으면 봇이 자동 생성하고 헤더를 맞춥니다.
+
+- `watchlist`: `name`, `ticker`, `themes`, `subthemes`, `non_priority_themes`
+- `holdings`: `name`, `ticker`, `quantity`, `avg_price`, `themes`, `subthemes`, `non_priority_themes`
+- `trade_history`: `date`, `type`, `name`, `ticker`, `quantity`, `price`, `avg_price_before`, `avg_price_after`, `realized_profit`, `realized_return_pct`, `remaining_quantity`, `memo`
+- `recommendation_history`: `date`, `name`, `ticker`, `action`, `quant_score`, `timing_score`, `market_state`, `themes`, `memo`
+
+설정 순서:
+
+1. Google Cloud Console에서 프로젝트를 만들고 Google Sheets API를 활성화합니다.
+2. Service Account를 만들고 JSON 키를 발급합니다.
+3. Google Sheets 문서를 만들고 서비스 계정 이메일에 편집 권한을 공유합니다.
+4. Render, Termux, PC에 같은 `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_SHEETS_SPREADSHEET_ID` 값을 설정합니다.
+5. `/관심추가`, `/보유추가`, `/보유목록`, `/매매이력`을 실행해 같은 시트가 갱신되는지 확인합니다.
 
 지원 명령어:
 
@@ -140,7 +168,7 @@ Slash command를 바로 테스트하려면 `DISCORD_GUILD_ID`를 테스트 서�
 
 ## 관심종목
 
-관심종목은 `watchlist.json`에서 관리합니다.
+관심종목은 Google Sheets의 `watchlist` 시트에서 우선 관리하고, 로컬 `watchlist.json`은 캐시/fallback으로 사용합니다.
 
 질문봇에서는 종목명만 입력해 관심종목을 추가할 수 있습니다. `/관심추가 풍산`처럼 입력하면 아래 순서로 티커를 찾습니다.
 
@@ -153,7 +181,7 @@ Slash command를 바로 테스트하려면 `DISCORD_GUILD_ID`를 테스트 서�
 
 테마는 `theme_map.json`에 있으면 자동 저장하고, 없으면 `미분류`로 저장합니다. 이후 `/관심테마수정 종목명 테마`로 수정할 수 있습니다.
 
-관심종목은 아직 매수하지 않은 후보군이고, 보유종목은 실제 매수한 포지션입니다. `/보유추가 엔비디아 10 120`처럼 종목명만 입력하면 `ticker_map.json`과 `theme_map.json`에서 티커와 테마를 자동으로 찾아 저장합니다. 이미 보유 중인 종목이면 수량이 더해지고 평균단가는 가중평균으로 자동 재계산됩니다. `/보유추가` 또는 `/관심매수`로 보유종목에 들어간 종목은 `watchlist.json`에서 자동 제외됩니다. `/분할매도`와 `/전량매도`는 실현손익을 `trade_history.json`에 저장합니다. `/보유삭제`는 관심종목으로 자동 복귀하지 않으며, 다시 후보로 보고 싶으면 `/관심추가`로 별도 등록합니다.
+관심종목은 아직 매수하지 않은 후보군이고, 보유종목은 실제 매수한 포지션입니다. `/보유추가 엔비디아 10 120`처럼 종목명만 입력하면 `ticker_map.json`과 `theme_map.json`에서 티커와 테마를 자동으로 찾아 저장합니다. 이미 보유 중인 종목이면 수량이 더해지고 평균단가는 가중평균으로 자동 재계산됩니다. `/보유추가` 또는 `/관심매수`로 보유종목에 들어간 종목은 `watchlist` 시트에서 자동 제외됩니다. `/분할매도`와 `/전량매도`는 실현손익을 `trade_history` 시트에 저장합니다. `/보유삭제`는 관심종목으로 자동 복귀하지 않으며, 다시 후보로 보고 싶으면 `/관심추가`로 별도 등록합니다.
 
 보유종목 평단은 해당 종목 거래통화 기준입니다. 한국주식은 KRW, 미국주식은 USD로 입력하며 원화/달러 자동 환산은 하지 않습니다.
 
@@ -255,8 +283,8 @@ Slash command를 바로 테스트하려면 `DISCORD_GUILD_ID`를 테스트 서�
 GitHub Actions 로그에는 아래 상태가 출력됩니다.
 
 - 리포트 생성 시작
-- `watchlist.json` 로드 성공/실패
-- `holdings.json` 로드 성공/실패
+- 관심종목 저장소 로드 성공/실패
+- 보유종목 저장소 로드 성공/실패
 - 추천/관심 메시지 Discord 발송 성공/실패
 - 보유종목 메시지 Discord 발송 성공/실패
 - 주말 또는 dry-run 스킵 사유

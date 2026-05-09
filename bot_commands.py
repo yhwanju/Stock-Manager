@@ -401,7 +401,7 @@ def add_holding(name: str, quantity: int, average_price: float) -> str:
         return _holding_lookup_failed(name)
 
     display_name, ticker, themes, subthemes, non_priority, _ = resolved
-    command_log(f"/보유추가 저장 시작: {display_name} / {ticker} / 경로: {storage.json_file_path_text(storage.HOLDINGS_FILE)}")
+    command_log(f"/보유추가 저장 시작: {display_name} / {ticker} / 저장소: {storage.storage_location_text(storage.HOLDINGS_FILE)}")
     try:
         status, item, before = storage.buy_holding(
             display_name,
@@ -416,13 +416,13 @@ def add_holding(name: str, quantity: int, average_price: float) -> str:
         verified = storage.verify_holding_saved(display_name, ticker, logger=command_log)
     except Exception as exc:
         command_log(f"/보유추가 저장 실패: {display_name} / {ticker} / {exc}")
-        return _holding_save_failed_message(display_name, "저장 실패", f"holdings.json 저장 중 오류가 발생했습니다.\n오류: **{exc}**")
+        return _holding_save_failed_message(display_name, "저장 실패", f"보유 데이터 저장 중 오류가 발생했습니다.\n오류: **{exc}**")
 
     if not verified:
         return _holding_save_failed_message(
             display_name,
             "저장 검증 실패",
-            "holdings.json에 저장 직후 다시 조회했지만 종목을 찾지 못했습니다.",
+            "보유 데이터에 저장 직후 다시 조회했지만 종목을 찾지 못했습니다.",
         )
 
     old_quantity = int(before.get("quantity", 0)) if before else 0
@@ -440,7 +440,7 @@ def add_holding(name: str, quantity: int, average_price: float) -> str:
         memo="추가매수" if before else "신규매수",
     )
     if not _record_trade_with_verification(trade):
-        return _holding_save_failed_message(display_name, "매매이력 저장 검증 실패", "trade_history.json에 BUY 이력을 저장했지만 다시 조회하지 못했습니다.")
+        return _holding_save_failed_message(display_name, "매매이력 저장 검증 실패", "매매이력에 BUY 이력을 저장했지만 다시 조회하지 못했습니다.")
 
     removed = storage.delete_watchlist(ticker) or storage.delete_watchlist(display_name) or storage.delete_watchlist(name)
     watchlist_status = "자동 제외 완료" if removed else "제외 대상 없음"
@@ -479,7 +479,7 @@ def buy_watchlist(name: str, quantity: int, average_price: float) -> str:
             return _holding_lookup_failed(name)
         display_name, ticker, themes, subthemes, non_priority, _ = resolved
 
-    command_log(f"/관심매수 저장 시작: {display_name} / {ticker} / 경로: {storage.json_file_path_text(storage.HOLDINGS_FILE)}")
+    command_log(f"/관심매수 저장 시작: {display_name} / {ticker} / 저장소: {storage.storage_location_text(storage.HOLDINGS_FILE)}")
     try:
         status, holding, before = storage.buy_holding(
             display_name,
@@ -494,13 +494,13 @@ def buy_watchlist(name: str, quantity: int, average_price: float) -> str:
         verified = storage.verify_holding_saved(display_name, ticker, logger=command_log)
     except Exception as exc:
         command_log(f"/관심매수 저장 실패: {display_name} / {ticker} / {exc}")
-        return _holding_save_failed_message(display_name, "저장 실패", f"holdings.json 저장 중 오류가 발생했습니다.\n오류: **{exc}**")
+        return _holding_save_failed_message(display_name, "저장 실패", f"보유 데이터 저장 중 오류가 발생했습니다.\n오류: **{exc}**")
 
     if not verified:
         return _holding_save_failed_message(
             display_name,
             "저장 검증 실패",
-            "holdings.json에 저장 직후 다시 조회했지만 종목을 찾지 못했습니다.",
+            "보유 데이터에 저장 직후 다시 조회했지만 종목을 찾지 못했습니다.",
         )
 
     current_average_price = float(verified.get("avg_price", verified.get("average_price", 0)))
@@ -515,7 +515,7 @@ def buy_watchlist(name: str, quantity: int, average_price: float) -> str:
         memo="관심매수 추가매수" if status == "additional_buy" else "관심매수 신규매수",
     )
     if not _record_trade_with_verification(trade):
-        return _holding_save_failed_message(display_name, "매매이력 저장 검증 실패", "trade_history.json에 BUY 이력을 저장했지만 다시 조회하지 못했습니다.")
+        return _holding_save_failed_message(display_name, "매매이력 저장 검증 실패", "매매이력에 BUY 이력을 저장했지만 다시 조회하지 못했습니다.")
 
     removed = storage.delete_watchlist(ticker) or storage.delete_watchlist(display_name) or storage.delete_watchlist(name)
     prefix = "관심매수 추가매수 반영 완료" if status == "additional_buy" else "관심매수 완료"
@@ -558,7 +558,7 @@ def partial_sell(name: str, quantity: int, sell_price: float) -> str:
         holding_verified = storage.verify_holding_removed(str(item.get("name", name)), ticker, logger=command_log)
 
     if not holding_verified:
-        return _holding_save_failed_message(str(before.get("name", name)), "저장 검증 실패", "매도 후 holdings.json 검증에 실패했습니다.")
+        return _holding_save_failed_message(str(before.get("name", name)), "저장 검증 실패", "매도 후 보유 데이터 검증에 실패했습니다.")
 
     trade_type = "PARTIAL_SELL" if remaining_quantity > 0 else "FULL_SELL"
     trade = _trade_entry(
@@ -574,7 +574,7 @@ def partial_sell(name: str, quantity: int, sell_price: float) -> str:
         memo="분할매도" if remaining_quantity > 0 else "분할매도 후 잔여수량 0",
     )
     if not _record_trade_with_verification(trade):
-        return _holding_save_failed_message(str(before.get("name", name)), "매매이력 저장 검증 실패", "trade_history.json에 매도 이력을 저장했지만 다시 조회하지 못했습니다.")
+        return _holding_save_failed_message(str(before.get("name", name)), "매매이력 저장 검증 실패", "매매이력에 매도 이력을 저장했지만 다시 조회하지 못했습니다.")
 
     status = "분할매도 반영 완료" if remaining_quantity > 0 else "전량매도 완료"
     remaining_text = (
@@ -614,7 +614,7 @@ def full_sell(name: str, sell_price: float) -> str:
     realized_return_pct = ((sell_price_value - avg_price) / avg_price) * 100 if avg_price else 0.0
     storage.save_holdings([holding for holding in holdings if holding is not item], logger=command_log)
     if not storage.verify_holding_removed(str(before.get("name", name)), ticker, logger=command_log):
-        return _holding_save_failed_message(str(before.get("name", name)), "저장 검증 실패", "전량매도 후 holdings.json 제거 검증에 실패했습니다.")
+        return _holding_save_failed_message(str(before.get("name", name)), "저장 검증 실패", "전량매도 후 보유 데이터 제거 검증에 실패했습니다.")
 
     trade = _trade_entry(
         "FULL_SELL",
@@ -629,7 +629,7 @@ def full_sell(name: str, sell_price: float) -> str:
         memo="전량매도",
     )
     if not _record_trade_with_verification(trade):
-        return _holding_save_failed_message(str(before.get("name", name)), "매매이력 저장 검증 실패", "trade_history.json에 전량매도 이력을 저장했지만 다시 조회하지 못했습니다.")
+        return _holding_save_failed_message(str(before.get("name", name)), "매매이력 저장 검증 실패", "매매이력에 전량매도 이력을 저장했지만 다시 조회하지 못했습니다.")
 
     return (
         f"종목명: **{before.get('name', name)}**\n"
@@ -670,13 +670,13 @@ def edit_holding(name: str, quantity: int, average_price: float) -> str:
         )
         verified = storage.verify_holding_saved(display_name, ticker, logger=command_log)
     except Exception as exc:
-        return _holding_save_failed_message(display_name, "보유수정 실패", f"holdings.json 수정 중 오류가 발생했습니다.\n오류: **{exc}**")
+        return _holding_save_failed_message(display_name, "보유수정 실패", f"보유 데이터 수정 중 오류가 발생했습니다.\n오류: **{exc}**")
 
     if not verified:
-        return _holding_save_failed_message(display_name, "저장 검증 실패", "보유수정 후 holdings.json 검증에 실패했습니다.")
+        return _holding_save_failed_message(display_name, "저장 검증 실패", "보유수정 후 보유 데이터 검증에 실패했습니다.")
 
     history_count = len(storage.load_trade_history(logger=command_log))
-    command_log(f"/보유수정 trade_history.json 읽음: {history_count}건 / 수동수정은 이력 미기록")
+    command_log(f"/보유수정 매매이력 읽음: {history_count}건 / 수동수정은 이력 미기록")
 
     before_text = (
         f"{int(before.get('quantity', 0)):,}주 / {analyzer.format_price_for_ticker(float(before.get('avg_price', before.get('average_price', 0))), ticker)}"
@@ -755,7 +755,7 @@ def delete_holding(query: str) -> str:
 def list_holdings() -> str:
     storage.prune_watchlist_holdings_overlap(logger=command_log)
     items = storage.load_holdings(logger=command_log)
-    command_log(f"/보유목록 holdings.json 읽음: {len(items)}개 / 경로: {storage.json_file_path_text(storage.HOLDINGS_FILE)}")
+    command_log(f"/보유목록 holdings 읽음: {len(items)}개 / 저장소: {storage.storage_location_text(storage.HOLDINGS_FILE)}")
     return analyzer.holdings_text(items=items, logger=command_log)
 
 

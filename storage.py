@@ -8,17 +8,25 @@ from config import (
     ALERTS_FILE,
     HOLDINGS_FILE,
     NEWS_SUMMARY_FILE,
+    RECOMMENDATION_HISTORY_FILE,
     THEME_CONFIG_FILE,
     THEME_MAP_FILE,
     TICKER_MAP_FILE,
     TRADE_HISTORY_FILE,
     WATCHLIST_FILE,
 )
+import sheets_storage
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 BASE_DIR = PROJECT_ROOT
 Logger = Callable[[str], None] | None
+SHEETS_TABLES = {
+    WATCHLIST_FILE: "watchlist",
+    HOLDINGS_FILE: "holdings",
+    TRADE_HISTORY_FILE: "trade_history",
+    RECOMMENDATION_HISTORY_FILE: "recommendation_history",
+}
 
 
 def describe_payload(payload: Any) -> str:
@@ -42,7 +50,14 @@ def json_file_path_text(file_name: str) -> str:
     return str(json_file_path(file_name))
 
 
-def load_json_file(file_name: str, default: Any, *, required: bool = False, logger: Logger = None) -> Any:
+def storage_location_text(file_name: str) -> str:
+    table_name = SHEETS_TABLES.get(file_name)
+    if table_name and sheets_storage.is_configured():
+        return f"Google Sheets:{table_name} / cache:{json_file_path(file_name)}"
+    return str(json_file_path(file_name))
+
+
+def _load_local_json_file(file_name: str, default: Any, *, required: bool = False, logger: Logger = None) -> Any:
     path = json_file_path(file_name)
     if not path.exists():
         level = "필수" if required else "선택"
@@ -60,8 +75,34 @@ def load_json_file(file_name: str, default: Any, *, required: bool = False, logg
     return payload
 
 
+def load_json_file(file_name: str, default: Any, *, required: bool = False, logger: Logger = None) -> Any:
+    table_name = SHEETS_TABLES.get(file_name)
+    if table_name and sheets_storage.is_configured():
+        try:
+            payload = sheets_storage.load_records(table_name)
+            if payload == [] and isinstance(default, list):
+                local_payload = _load_local_json_file(file_name, default, logger=None)
+                if isinstance(local_payload, list) and local_payload:
+                    sheets_storage.save_records(table_name, local_payload)
+                    payload = local_payload
+                    log(logger, f"{file_name} Google Sheets 초기 동기화 성공: 로컬 캐시 {describe_payload(payload)} -> sheet: {table_name}")
+            log(logger, f"{file_name} Google Sheets 로드 성공: {describe_payload(payload)} / sheet: {table_name}")
+            return payload
+        except Exception as exc:
+            log(logger, f"{file_name} Google Sheets 로드 실패: {exc}. 로컬 캐시로 진행합니다.")
+
+    return _load_local_json_file(file_name, default, required=required, logger=logger)
+
+
 def save_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
     path = json_file_path(file_name)
+    table_name = SHEETS_TABLES.get(file_name)
+    if table_name and sheets_storage.is_configured():
+        if not isinstance(payload, list):
+            raise ValueError(f"{file_name}은 Google Sheets 저장 시 목록 형식이어야 합니다.")
+        sheets_storage.save_records(table_name, payload)
+        log(logger, f"{file_name} Google Sheets 저장 성공: {describe_payload(payload)} / sheet: {table_name}")
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
@@ -76,7 +117,7 @@ def normalize(value: str) -> str:
 def load_watchlist(logger: Logger = None) -> list[dict[str, Any]]:
     payload = load_json_file(WATCHLIST_FILE, [], required=True, logger=logger)
     if not isinstance(payload, list):
-        log(logger, f"{WATCHLIST_FILE} 로드 실패: 목록 형식이 아닙니다. 경로: {json_file_path(WATCHLIST_FILE)}")
+        log(logger, f"{WATCHLIST_FILE} 로드 실패: 목록 형식이 아닙니다. 저장소: {storage_location_text(WATCHLIST_FILE)}")
         return []
     return payload
 
@@ -88,7 +129,7 @@ def save_watchlist(items: list[dict[str, Any]], logger: Logger = None) -> None:
 def load_holdings(logger: Logger = None) -> list[dict[str, Any]]:
     payload = load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
     if not isinstance(payload, list):
-        log(logger, f"{HOLDINGS_FILE} 로드 실패: 목록 형식이 아닙니다. 경로: {json_file_path(HOLDINGS_FILE)}")
+        log(logger, f"{HOLDINGS_FILE} 로드 실패: 목록 형식이 아닙니다. 저장소: {storage_location_text(HOLDINGS_FILE)}")
         return []
     return payload
 
@@ -100,13 +141,25 @@ def save_holdings(items: list[dict[str, Any]], logger: Logger = None) -> None:
 def load_trade_history(logger: Logger = None) -> list[dict[str, Any]]:
     payload = load_json_file(TRADE_HISTORY_FILE, [], logger=logger)
     if not isinstance(payload, list):
-        log(logger, f"{TRADE_HISTORY_FILE} 로드 실패: 목록 형식이 아닙니다. 경로: {json_file_path(TRADE_HISTORY_FILE)}")
+        log(logger, f"{TRADE_HISTORY_FILE} 로드 실패: 목록 형식이 아닙니다. 저장소: {storage_location_text(TRADE_HISTORY_FILE)}")
         return []
     return payload
 
 
 def save_trade_history(items: list[dict[str, Any]], logger: Logger = None) -> None:
     save_json_file(TRADE_HISTORY_FILE, items, logger=logger)
+
+
+def load_recommendation_history(logger: Logger = None) -> list[dict[str, Any]]:
+    payload = load_json_file(RECOMMENDATION_HISTORY_FILE, [], logger=logger)
+    if not isinstance(payload, list):
+        log(logger, f"{RECOMMENDATION_HISTORY_FILE} 로드 실패: 목록 형식이 아닙니다. 저장소: {storage_location_text(RECOMMENDATION_HISTORY_FILE)}")
+        return []
+    return payload
+
+
+def save_recommendation_history(items: list[dict[str, Any]], logger: Logger = None) -> None:
+    save_json_file(RECOMMENDATION_HISTORY_FILE, items, logger=logger)
 
 
 def load_news_summary(logger: Logger = None) -> dict[str, Any]:
@@ -395,9 +448,9 @@ def verify_holding_saved(name: str, ticker: str, logger: Logger = None) -> dict[
     items = load_holdings(logger=logger)
     target = find_item(items, name) or find_item(items, ticker)
     if target:
-        log(logger, f"holdings.json 저장 검증 성공: {target.get('name', name)} / {target.get('ticker', ticker)} / 총 {len(items)}개")
+        log(logger, f"보유 데이터 저장 검증 성공: {target.get('name', name)} / {target.get('ticker', ticker)} / 총 {len(items)}개 / 저장소: {storage_location_text(HOLDINGS_FILE)}")
     else:
-        log(logger, f"holdings.json 저장 검증 실패: {name} / {ticker} / 총 {len(items)}개 / 경로: {json_file_path(HOLDINGS_FILE)}")
+        log(logger, f"보유 데이터 저장 검증 실패: {name} / {ticker} / 총 {len(items)}개 / 저장소: {storage_location_text(HOLDINGS_FILE)}")
     return target
 
 
@@ -406,9 +459,9 @@ def verify_holding_removed(name: str, ticker: str, logger: Logger = None) -> boo
     target = find_item(items, name) or find_item(items, ticker)
     removed = target is None
     if removed:
-        log(logger, f"holdings.json 제거 검증 성공: {name} / {ticker} / 총 {len(items)}개")
+        log(logger, f"보유 데이터 제거 검증 성공: {name} / {ticker} / 총 {len(items)}개 / 저장소: {storage_location_text(HOLDINGS_FILE)}")
     else:
-        log(logger, f"holdings.json 제거 검증 실패: {name} / {ticker} / 총 {len(items)}개")
+        log(logger, f"보유 데이터 제거 검증 실패: {name} / {ticker} / 총 {len(items)}개 / 저장소: {storage_location_text(HOLDINGS_FILE)}")
     return removed
 
 

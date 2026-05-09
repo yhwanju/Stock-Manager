@@ -1166,12 +1166,7 @@ def build_daily_report_messages(
     holding_analyses: dict[str, StockAnalysis],
 ) -> list[str]:
     now = datetime.now(KST)
-    recommendation_pool = [item for item in watchlist if not item.error]
-    recommendations = sorted(
-        recommendation_pool,
-        key=lambda item: (item.composite_score, item.timing_score, item.quant_score),
-        reverse=True,
-    )[:3]
+    recommendations = select_top_recommendations(watchlist)
     new_entry_action = "관망"
     if recommendations and recommendations[0].final_action in {"매수가능", "분할매수", "선별매수", "소액분할매수"}:
         new_entry_action = recommendations[0].final_action
@@ -1268,7 +1263,62 @@ def build_daily_report_messages(
     return ["\n".join(message1).strip(), "\n".join(message2).strip()]
 
 
-def build_daily_reports(logger: Logger = None) -> list[str]:
+def select_top_recommendations(watchlist: list[StockAnalysis]) -> list[StockAnalysis]:
+    recommendation_pool = [item for item in watchlist if not item.error]
+    return sorted(
+        recommendation_pool,
+        key=lambda item: (item.composite_score, item.timing_score, item.quant_score),
+        reverse=True,
+    )[:3]
+
+
+def record_recommendation_history(
+    market: MarketSummary,
+    recommendations: list[StockAnalysis],
+    logger: Logger = None,
+) -> None:
+    if not recommendations:
+        log(logger, "추천이력 저장 스킵: 추천 종목 없음")
+        return
+
+    try:
+        now = datetime.now(KST)
+        today = f"{now:%Y-%m-%d}"
+        history = storage.load_recommendation_history(logger=logger)
+        existing_keys = {
+            (str(item.get("date", ""))[:10], str(item.get("ticker", "")))
+            for item in history
+        }
+        added = 0
+        for item in recommendations:
+            key = (today, item.ticker)
+            if key in existing_keys:
+                continue
+            history.append(
+                {
+                    "date": f"{now:%Y-%m-%d %H:%M:%S} KST",
+                    "name": item.name,
+                    "ticker": item.ticker,
+                    "action": item.final_action,
+                    "quant_score": item.quant_score,
+                    "timing_score": item.timing_score,
+                    "market_state": market.state,
+                    "themes": item.themes,
+                    "memo": "daily_report_top3",
+                }
+            )
+            added += 1
+
+        if not added:
+            log(logger, "추천이력 저장 스킵: 오늘 추천이력 이미 존재")
+            return
+        storage.save_recommendation_history(history, logger=logger)
+        log(logger, f"추천이력 저장 성공: {added}건")
+    except Exception as exc:
+        log(logger, f"추천이력 저장 실패: {exc}")
+
+
+def build_daily_reports(logger: Logger = None, record_recommendations: bool = False) -> list[str]:
     log(logger, "리포트 생성 시작")
     context = build_context(logger=logger)
     log(logger, f"시장 상태 판단 완료: {context.market.state}")
@@ -1286,6 +1336,8 @@ def build_daily_reports(logger: Logger = None) -> list[str]:
         holdings=context.holdings,
         holding_analyses=holding_analyses,
     )
+    if record_recommendations:
+        record_recommendation_history(context.market, select_top_recommendations(watchlist), logger=logger)
     log(logger, f"리포트 생성 완료: 메시지1 {len(reports[0])}자, 메시지2 {len(reports[1])}자")
     return reports
 
@@ -1477,7 +1529,7 @@ def holdings_text(items: list[dict[str, Any]] | None = None, logger: Logger = No
     if items is None:
         storage.prune_watchlist_holdings_overlap(logger=logger)
         items = storage.load_holdings(logger=logger)
-    log(logger, f"보유목록 출력 준비: holdings.json {len(items)}개 / 경로: {storage.json_file_path_text(storage.HOLDINGS_FILE)}")
+    log(logger, f"보유목록 출력 준비: holdings {len(items)}개 / 저장소: {storage.storage_location_text(storage.HOLDINGS_FILE)}")
     realized_totals = realized_profit_map(storage.load_trade_history(logger=logger))
     lines = section("💼 보유목록")
     if not items:

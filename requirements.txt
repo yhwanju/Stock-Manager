@@ -6,3 +6,5 @@ tzdata>=2024.1
 discord.py>=2.4.0
 Flask>=3.0.0
 finance-datareader>=0.9.90
+gspread>=6.1.0
+google-auth>=2.29.0
