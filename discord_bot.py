@@ -73,8 +73,15 @@ def run_health_server() -> None:
             return "Bot is running", 200
 
         port = int(os.environ.get("PORT", 10000))
+        print(f"Detected Render PORT={port}", flush=True)
         print(f"Flask health server started on port {port}", flush=True)
-        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
+        app.run(
+            host="0.0.0.0",
+            port=port,
+            debug=False,
+            use_reloader=False,
+            threaded=True,
+        )
     except Exception as exc:
         print(f"[stock-question-bot] Flask health server failed: {exc}", flush=True)
 
