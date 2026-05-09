@@ -72,9 +72,9 @@ def run_health_server() -> None:
         def health_check() -> tuple[str, int]:
             return "Bot is running", 200
 
-        port = int(os.getenv("PORT", "10000"))
-        print(f"[stock-question-bot] Flask health server started on port {port}", flush=True)
-        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+        port = int(os.environ.get("PORT", 10000))
+        print(f"Flask health server started on port {port}", flush=True)
+        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
     except Exception as exc:
         print(f"[stock-question-bot] Flask health server failed: {exc}", flush=True)
 
