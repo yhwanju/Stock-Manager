@@ -143,6 +143,18 @@ async def list_watchlist_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.list_watchlist)
 
 
+@client.tree.command(name="종목매핑확인", description="종목명 자동검색 결과를 확인합니다.")
+@app_commands.describe(종목명="종목명 또는 티커. 예: 풍산, CRCL")
+async def mapping_check_command(interaction: discord.Interaction, 종목명: str) -> None:
+    await respond(interaction, bot_commands.mapping_check, 종목명)
+
+
+@client.tree.command(name="관심테마수정", description="관심/보유종목의 테마를 수정합니다.")
+@app_commands.describe(종목명="종목명 또는 티커", 테마="예: 원자재,방산")
+async def update_item_theme_command(interaction: discord.Interaction, 종목명: str, 테마: str) -> None:
+    await respond(interaction, bot_commands.update_item_theme, 종목명, 테마)
+
+
 @client.tree.command(name="관심매수", description="관심종목을 보유종목으로 이동하거나 자동 매핑으로 추가합니다.")
 @app_commands.describe(종목명="종목명. 예: 엔비디아, HK이노엔, WDC", 수량="매수 수량", 평단="평균 단가")
 async def buy_watchlist_command(interaction: discord.Interaction, 종목명: str, 수량: int, 평단: float) -> None:

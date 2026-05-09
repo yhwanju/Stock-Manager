@@ -16,16 +16,22 @@ def help_text() -> str:
 → 오늘 강한 테마 기준 추천종목 3개 이름만 보여줍니다.
 
 /관심추가 종목명
-→ 티커와 테마를 자동으로 찾아 관심종목을 추가합니다. 예: /관심추가 엔비디아
+→ 티커와 테마를 자동검색해 관심종목을 추가합니다. 예: /관심추가 풍산
 
 /관심추가직접 종목명 티커 테마
-→ 직접 입력해 관심종목을 추가합니다. 예: /관심추가직접 엔켐 348370.KQ 2차전지,ESS
+→ 자동검색 실패 시 직접 입력합니다. 예: /관심추가직접 엔켐 348370.KQ 2차전지,ESS
 
 /관심삭제 종목명
 → 관심종목을 삭제합니다. 예: /관심삭제 엔켐
 
 /관심목록
 → 현재 관심종목 목록을 보여줍니다.
+
+/종목매핑확인 종목명
+→ 자동검색 결과를 확인합니다. 예: /종목매핑확인 풍산
+
+/관심테마수정 종목명 테마
+→ 관심/보유종목의 테마를 수정합니다. 예: /관심테마수정 풍산 원자재,방산
 
 /관심매수 종목명 수량 평단
 → 관심종목을 보유종목으로 이동하거나 자동 매핑으로 추가합니다. 예: /관심매수 HK이노엔 50 49500
@@ -94,14 +100,23 @@ def _theme_fields_from_payload(payload: dict) -> tuple[list[str], list[str], lis
     return themes, subthemes, non_priority
 
 
+def _theme_fields_for_query(query: str, ticker: str, source: dict | None = None) -> tuple[list[str], list[str], list[str]]:
+    if source:
+        return analyzer.normalize_stock_theme_fields(source)
+    theme_payload, _ = storage.find_theme_mapping(query, ticker)
+    if theme_payload:
+        return _theme_fields_from_payload(theme_payload)
+    return ["미분류"], [], []
+
+
 def _ticker_lookup_failed(name: str) -> str:
     return (
         f"종목명: **{name}**\n"
-        "상태: **자동 매핑 실패**\n\n"
+        "상태: **자동검색 실패**\n\n"
         "안내:\n"
-        "ticker_map.json에 해당 종목이 없습니다.\n"
-        "아래 형식으로 직접 추가하거나 ticker_map.json에 등록해주세요.\n\n"
-        "/관심추가직접 종목명 티커 테마"
+        "1. 한국 종목이면 정확한 종목명을 입력해주세요.\n"
+        "2. 미국 종목이면 티커로 입력해주세요. 예: NVDA, CRCL\n"
+        "3. 그래도 안 되면 /관심추가직접을 사용해주세요."
     )
 
 
@@ -126,20 +141,12 @@ def _already_held_message(item: dict) -> str:
 
 
 def add_watchlist(name: str) -> str:
-    ticker_map = storage.load_ticker_map()
-    ticker, mapped_name = storage.resolve_ticker(name, ticker_map)
-    if not ticker:
+    resolution = analyzer.resolve_ticker(name)
+    if not resolution:
         return _ticker_lookup_failed(name)
 
-    display_name = (
-        mapped_name
-        if mapped_name and (storage.normalize(name) == storage.normalize(ticker) or name.strip().isdigit())
-        else name.strip()
-    )
-    theme_payload, _ = storage.find_theme_mapping(name, ticker, ticker_map=ticker_map)
-    if not theme_payload or not theme_payload.get("themes"):
-        return _theme_lookup_failed(display_name, ticker)
-
+    display_name = resolution.name
+    ticker = resolution.ticker
     holding = storage.find_item(storage.load_holdings(), display_name) or storage.find_item(storage.load_holdings(), ticker)
     if holding:
         return _already_held_message(holding)
@@ -149,7 +156,7 @@ def add_watchlist(name: str) -> str:
     if existing:
         return _format_watchlist_item("이미 관심종목에 있습니다.", existing)
 
-    themes, subthemes, non_priority = _theme_fields_from_payload(theme_payload)
+    themes, subthemes, non_priority = _theme_fields_for_query(name, ticker)
     status, item = storage.upsert_watchlist(display_name, ticker, themes, subthemes, non_priority)
     warning = ""
     if non_priority:
@@ -186,25 +193,75 @@ def list_watchlist() -> str:
     return analyzer.watchlist_text()
 
 
+def mapping_check(name: str) -> str:
+    resolution = analyzer.resolve_ticker(name)
+    if not resolution:
+        return _ticker_lookup_failed(name)
+
+    themes, _, _ = _theme_fields_for_query(name, resolution.ticker)
+    theme_label = ", ".join(themes) or "미분류"
+    return (
+        f"종목명: **{resolution.name}**\n"
+        f"티커: **{resolution.ticker}**\n"
+        f"검색방식: **{resolution.search_method}**\n"
+        f"테마: **{theme_label}**"
+    )
+
+
+def update_item_theme(name: str, themes_text: str) -> str:
+    themes, subthemes, non_priority = analyzer.resolve_theme_inputs(themes_text, storage.load_theme_config())
+    if not themes:
+        return "테마를 입력해주세요. 예: /관심테마수정 풍산 원자재,방산"
+
+    watchlist = storage.load_watchlist()
+    item = storage.find_item(watchlist, name)
+    target = "관심종목"
+    if item:
+        item["themes"] = themes
+        item["subthemes"] = subthemes
+        if non_priority:
+            item["non_priority_themes"] = non_priority
+        else:
+            item.pop("non_priority_themes", None)
+        storage.save_watchlist(watchlist)
+    else:
+        holdings = storage.load_holdings()
+        item = storage.find_item(holdings, name)
+        target = "보유종목"
+        if not item:
+            return f"종목명: **{name}**\n상태: **종목 없음**"
+        item["themes"] = themes
+        item["subthemes"] = subthemes
+        if non_priority:
+            item["non_priority_themes"] = non_priority
+        else:
+            item.pop("non_priority_themes", None)
+        storage.save_holdings(holdings)
+
+    theme_label = ", ".join(themes) or "-"
+    subtheme_label = ", ".join(subthemes) or "-"
+    return (
+        f"종목명: **{item.get('name', name)}**\n"
+        f"대상: **{target}**\n"
+        "상태: **테마 수정 완료**\n"
+        f"테마: **{theme_label}**\n"
+        f"세부태그: **{subtheme_label}**"
+    )
+
+
 def _holding_lookup_failed(name: str) -> str:
     return (
         f"종목명: **{name}**\n"
-        "상태: **자동 매핑 실패**\n\n"
+        "상태: **자동검색 실패**\n\n"
         "안내:\n"
-        "ticker_map.json에 해당 종목이 없습니다.\n"
-        "먼저 ticker_map.json에 종목을 등록하거나 /관심추가직접 기능을 사용해주세요."
+        "1. 한국 종목이면 정확한 종목명을 입력해주세요.\n"
+        "2. 미국 종목이면 티커로 입력해주세요. 예: NVDA, CRCL\n"
+        "3. 그래도 안 되면 /관심추가직접을 사용해주세요."
     )
 
 
 def _holding_theme_fields(source: dict | None, query: str, ticker: str) -> tuple[list[str], list[str], list[str]]:
-    if source:
-        return analyzer.normalize_stock_theme_fields(source)
-
-    ticker_map = storage.load_ticker_map()
-    theme_payload, _ = storage.find_theme_mapping(query, ticker, ticker_map=ticker_map)
-    if theme_payload:
-        return _theme_fields_from_payload(theme_payload)
-    return [], [], []
+    return _theme_fields_for_query(query, ticker, source)
 
 
 def _format_holding_result(prefix: str, item: dict, watchlist_removed: bool) -> str:
@@ -222,24 +279,18 @@ def _format_holding_result(prefix: str, item: dict, watchlist_removed: bool) -> 
 
 
 def _mapped_holding_payload(name: str) -> tuple[str, str, list[str], list[str], list[str], dict | None] | None:
-    ticker_map = storage.load_ticker_map()
-    ticker, mapped_name = storage.resolve_ticker(name, ticker_map)
-    if not ticker:
+    resolution = analyzer.resolve_ticker(name)
+    if not resolution:
         return None
 
     watchlist = storage.load_watchlist()
-    watchlist_item = storage.find_item(watchlist, name) or storage.find_item(watchlist, ticker)
-
-    display_name = (
-        mapped_name
-        if mapped_name and (storage.normalize(name) == storage.normalize(ticker) or name.strip().isdigit())
-        else name.strip()
-    )
+    watchlist_item = storage.find_item(watchlist, name) or storage.find_item(watchlist, resolution.ticker)
+    display_name = resolution.name
     if watchlist_item:
         display_name = str(watchlist_item.get("name", display_name))
 
-    themes, subthemes, non_priority = _holding_theme_fields(watchlist_item, name, ticker)
-    return display_name, ticker, themes, subthemes, non_priority, watchlist_item
+    themes, subthemes, non_priority = _holding_theme_fields(watchlist_item, name, resolution.ticker)
+    return display_name, resolution.ticker, themes, subthemes, non_priority, watchlist_item
 
 
 def add_holding(name: str, quantity: int, average_price: float) -> str:
@@ -266,9 +317,9 @@ def buy_watchlist(name: str, quantity: int, average_price: float) -> str:
     watchlist = storage.load_watchlist()
     item = storage.find_item(watchlist, name)
     if not item:
-        ticker, _ = storage.resolve_ticker(name)
-        if ticker:
-            item = storage.find_item(watchlist, ticker)
+        resolution = analyzer.resolve_ticker(name)
+        if resolution:
+            item = storage.find_item(watchlist, resolution.ticker)
 
     if item:
         themes, subthemes, non_priority = analyzer.normalize_stock_theme_fields(item)

@@ -23,6 +23,7 @@ from config import (
 
 
 Logger = Callable[[str], None] | None
+KRX_LISTING_CACHE: pd.DataFrame | None = None
 
 
 @dataclass
@@ -69,6 +70,15 @@ class AnalysisContext:
     holdings: list[dict[str, Any]]
     news_summary: dict[str, Any]
     theme_config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TickerResolution:
+    query: str
+    name: str
+    ticker: str
+    search_method: str
+    market: str = ""
 
 
 def log(logger: Logger, message: str) -> None:
@@ -273,6 +283,133 @@ def normalize_ticker_symbol(value: str) -> str:
     if contains_hangul(text):
         return text
     return text.upper()
+
+
+def looks_like_us_ticker(value: str) -> bool:
+    text = value.strip().upper()
+    if not text or contains_hangul(text):
+        return False
+    if text.isdigit():
+        return False
+    return len(text) <= 12 and all(char.isalnum() or char in {".", "-"} for char in text)
+
+
+def yfinance_has_data(ticker: str) -> bool:
+    try:
+        history = yf.Ticker(ticker).history(period="5d", interval="1d", auto_adjust=False)
+        return not history.empty and "Close" in history.columns
+    except Exception:
+        return False
+
+
+def krx_yfinance_suffix(market: str) -> str | None:
+    normalized = str(market or "").upper()
+    if "KOSDAQ" in normalized:
+        return "KQ"
+    if "KOSPI" in normalized:
+        return "KS"
+    return None
+
+
+def load_krx_listing() -> pd.DataFrame | None:
+    global KRX_LISTING_CACHE
+    if KRX_LISTING_CACHE is not None:
+        return KRX_LISTING_CACHE
+    try:
+        import FinanceDataReader as fdr
+
+        listing = fdr.StockListing("KRX")
+        if isinstance(listing, pd.DataFrame) and not listing.empty:
+            KRX_LISTING_CACHE = listing
+            return KRX_LISTING_CACHE
+    except Exception:
+        return None
+    return None
+
+
+def resolve_krx_ticker(query: str) -> TickerResolution | None:
+    listing = load_krx_listing()
+    if listing is None or listing.empty:
+        return None
+
+    name_column = "Name" if "Name" in listing.columns else None
+    code_column = "Code" if "Code" in listing.columns else None
+    market_column = "Market" if "Market" in listing.columns else None
+    if not name_column or not code_column:
+        return None
+
+    if query.strip().isdigit():
+        normalized_code = query.strip().zfill(6)
+        matches = listing[listing[code_column].astype(str).str.zfill(6) == normalized_code]
+    else:
+        normalized_query = normalize_text(query)
+        names = listing[name_column].astype(str).map(normalize_text)
+        matches = listing[names == normalized_query]
+
+    if matches.empty:
+        return None
+
+    for _, row in matches.iterrows():
+        market = str(row.get(market_column, "")) if market_column else ""
+        suffix = krx_yfinance_suffix(market)
+        if not suffix:
+            continue
+        code = str(row[code_column]).zfill(6)
+        return TickerResolution(
+            query=query,
+            name=str(row.get(name_column, query)),
+            ticker=f"{code}.{suffix}",
+            search_method="FinanceDataReader KRX 자동검색",
+            market=market,
+        )
+    return None
+
+
+def resolve_ticker(name_or_ticker: str) -> TickerResolution | None:
+    query = name_or_ticker.strip()
+    if not query:
+        return None
+
+    ticker_map = storage.load_ticker_map()
+    normalized_query = storage.normalize(query)
+
+    for name, ticker in ticker_map.items():
+        if storage.normalize(name) == normalized_query:
+            return TickerResolution(
+                query=query,
+                name=str(name),
+                ticker=normalize_ticker_symbol(str(ticker)),
+                search_method="ticker_map.json 종목명 매칭",
+            )
+
+    for name, ticker in ticker_map.items():
+        normalized_ticker = storage.normalize(str(ticker))
+        if normalized_ticker == normalized_query or (
+            normalized_query.isdigit() and normalized_ticker.startswith(f"{normalized_query}.")
+        ):
+            display_name = query if not query.isdigit() else str(name)
+            return TickerResolution(
+                query=query,
+                name=display_name,
+                ticker=normalize_ticker_symbol(str(ticker)),
+                search_method="ticker_map.json 티커 매칭",
+            )
+
+    krx_resolution = resolve_krx_ticker(query)
+    if krx_resolution:
+        return krx_resolution
+
+    if looks_like_us_ticker(query):
+        ticker = query.upper()
+        if yfinance_has_data(ticker):
+            return TickerResolution(
+                query=query,
+                name=ticker,
+                ticker=ticker,
+                search_method="yfinance 미국 티커 직접 조회",
+            )
+
+    return None
 
 
 def resolve_ticker_from_map(query: str, ticker_map: dict[str, str]) -> str | None:
@@ -523,7 +660,7 @@ def analyze_stock(stock: dict[str, Any], strong_themes: list[str], market_state:
         analysis.quant_score = quant_score
         analysis.timing_score = timing_score
         analysis.current_state = describe_current_state(price, ma5, ma20, ma60, rsi, volume_ratio)
-        analysis.entry_zone = f"{format_krw(entry_low)} ~ {format_krw(entry_high)}"
+        analysis.entry_zone = f"{format_price_for_ticker(entry_low, ticker)} ~ {format_price_for_ticker(entry_high, ticker)}"
         analysis.stop_price = stop_price
         analysis.target_price = target_price
         analysis.metrics = {
@@ -929,19 +1066,18 @@ def find_known_stock(query: str, context: AnalysisContext | None = None) -> dict
 
 def analyze_query_stock(query: str) -> tuple[StockAnalysis, AnalysisContext]:
     context = build_context()
-    ticker_map = storage.load_ticker_map()
-    mapped_ticker, mapped_name = storage.resolve_ticker(query, ticker_map)
-    if mapped_ticker:
-        display_name = (
-            mapped_name
-            if mapped_name and (storage.normalize(query) == storage.normalize(mapped_ticker) or query.strip().isdigit())
-            else query
-        )
-        stock: dict[str, Any] = {"name": display_name, "ticker": normalize_ticker_symbol(mapped_ticker)}
-        theme_payload, _ = storage.find_theme_mapping(query, mapped_ticker, ticker_map=ticker_map)
+    resolution = resolve_ticker(query)
+    if resolution:
+        known_stock = find_known_stock(query, context) or find_known_stock(resolution.ticker, context)
+        stock: dict[str, Any] = {"name": resolution.name, "ticker": resolution.ticker}
+        if known_stock:
+            stock.update(known_stock)
+        theme_payload, _ = storage.find_theme_mapping(query, resolution.ticker)
         if theme_payload:
             stock["themes"] = theme_payload.get("themes", [])
             stock["subthemes"] = theme_payload.get("subthemes", [])
+        elif not stock.get("themes"):
+            stock["themes"] = ["미분류"]
         return analyze_stock(stock, context.strong_themes, context.market.state), context
 
     known_stock = find_known_stock(query, context)
@@ -980,21 +1116,21 @@ def stock_detail_report(query: str) -> str:
             "**🔎 종목분석**\n"
             "━━━━━━━━━━\n\n"
             f"입력값: {bold(query)}\n"
-            "상태: **종목 또는 티커를 찾을 수 없습니다**\n\n"
-            "확인:\n"
-            "* 미국 주식은 `NVDA`, `PLTR`, `TSLA`, `CRCL`처럼 티커로 입력\n"
-            "* 한국 종목명은 `ticker_map.json`에 등록 필요\n"
-            "* 한국 6자리 종목코드는 `.KS` 또는 `.KQ` 포함 권장"
+            "상태: **자동검색 실패**\n\n"
+            "안내:\n"
+            "1. 한국 종목이면 정확한 종목명을 입력해주세요.\n"
+            "2. 미국 종목이면 티커로 입력해주세요. 예: NVDA, CRCL\n"
+            "3. 그래도 안 되면 /관심추가직접을 사용해주세요."
         )
 
     lines: list[str] = []
     lines.extend(section("🔎 종목분석"))
     lines.append(f"종목명: {bold(analysis.name)}")
     lines.append(f"티커: {bold(analysis.ticker)}")
-    lines.append(f"현재가: {bold(format_krw(analysis.current_price))}")
+    lines.append(f"현재가: {bold(format_price_for_ticker(analysis.current_price, analysis.ticker))}")
     lines.append(f"등락률: {bold(format_pct(analysis.change_pct))}")
     lines.append(f"20일선 위치: {bold(format_pct(analysis.metrics.get('price_vs_ma20')))}")
-    lines.append(f"60일선: {bold(format_krw(analysis.metrics.get('ma60')))}")
+    lines.append(f"60일선: {bold(format_price_for_ticker(analysis.metrics.get('ma60'), analysis.ticker))}")
     rsi_text = f"{analysis.metrics.get('rsi', 0):.1f}" if not analysis.error else "-"
     volume_text = f"{analysis.metrics.get('volume_ratio', 0):.1f}배" if not analysis.error else "-"
     lines.append(f"RSI: {bold(rsi_text)}")
@@ -1010,8 +1146,8 @@ def stock_detail_report(query: str) -> str:
     lines.append("진입 가능 구간:")
     lines.append(analysis.entry_zone)
     lines.append("")
-    append_price_block(lines, "손절가", analysis.stop_price)
-    append_price_block(lines, "목표가", analysis.target_price)
+    append_price_block(lines, "손절가", analysis.stop_price, analysis.ticker)
+    append_price_block(lines, "목표가", analysis.target_price, analysis.ticker)
     lines.append(f"최종 액션: {bold(analysis.final_action)}")
     lines.append("")
     lines.append("근거:")
