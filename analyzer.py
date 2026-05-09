@@ -27,6 +27,21 @@ KRX_LISTING_CACHE: pd.DataFrame | None = None
 
 
 @dataclass
+class TargetPriceLevel:
+    label: str
+    price: float | None
+    emoji: str
+
+
+@dataclass
+class TargetPriceAnalysis:
+    levels: list[TargetPriceLevel] = field(default_factory=list)
+    most_realistic_label: str = "-"
+    extension_note: str = "강한 테마 지속 시 최종 목표가 가능"
+    condition_score: int = 0
+
+
+@dataclass
 class StockAnalysis:
     name: str
     ticker: str
@@ -42,6 +57,7 @@ class StockAnalysis:
     entry_zone: str = "-"
     stop_price: float | None = None
     target_price: float | None = None
+    target_analysis: TargetPriceAnalysis = field(default_factory=TargetPriceAnalysis)
     reason: str = "시세 데이터를 수집하지 못했습니다."
     reason_bullets: list[str] = field(default_factory=list)
     risk_bullets: list[str] = field(default_factory=list)
@@ -592,6 +608,169 @@ def build_risk_bullets(analysis: StockAnalysis, market_state: str) -> list[str]:
     return risks[:3]
 
 
+def recent_high_value(high: pd.Series, fallback: float, days: int) -> float:
+    values = high.dropna().tail(days)
+    if values.empty:
+        return fallback
+    return float(values.max())
+
+
+def target_condition_score(analysis: StockAnalysis, market_state: str, theme_bonus: int) -> int:
+    metrics = analysis.metrics
+    price = analysis.current_price or 0.0
+    ma5 = metrics.get("ma5", price)
+    ma20 = metrics.get("ma20", price)
+    ma60 = metrics.get("ma60", ma20)
+    volume_ratio = metrics.get("volume_ratio", 1.0)
+    volatility20 = metrics.get("volatility20", 0.0)
+    momentum20 = metrics.get("momentum20", 0.0)
+
+    score = {
+        "상승장": 20,
+        "변동성 확대장": 10,
+        "횡보장": 4,
+        "하락장": -15,
+    }.get(market_state, 0)
+
+    score += 20 if analysis.quant_score >= 80 else 14 if analysis.quant_score >= 70 else 8 if analysis.quant_score >= 60 else 0
+    score += 20 if analysis.timing_score >= 75 else 14 if analysis.timing_score >= 65 else 6 if analysis.timing_score >= 50 else -4
+    score += 15 if theme_bonus > 0 else 0
+
+    if 1.2 <= volume_ratio <= 3:
+        score += 10
+    elif 3 < volume_ratio <= 4.5:
+        score += 4
+    elif volume_ratio < 0.8:
+        score -= 5
+
+    if volatility20 <= 0.035:
+        score += 8
+    elif volatility20 <= 0.06:
+        score += 2
+    else:
+        score -= 8
+
+    if price > ma5 > ma20 > ma60:
+        score += 15
+    elif price > ma20 and ma20 >= ma60 * 0.98:
+        score += 8
+    elif price < ma20:
+        score -= 8
+
+    if momentum20 >= 8:
+        score += 5
+    elif momentum20 <= -5:
+        score -= 5
+
+    return clamp(score)
+
+
+def select_target_extension_note(market_state: str, condition_score: int, theme_bonus: int) -> str:
+    if market_state == "하락장":
+        return "하락장에서는 최종 목표가는 확장 목표로만 관리"
+    if market_state == "변동성 확대장":
+        return "변동성 진정과 거래량 유지 시 최종 목표가 가능"
+    if condition_score >= 82 and theme_bonus > 0:
+        return "강한 테마와 거래량이 유지되면 최종 목표가 가능"
+    if condition_score < 55:
+        return "최종 목표가는 확장 목표로만 관리"
+    return "강한 테마 지속 시 최종 목표가 가능"
+
+
+def build_target_price_analysis(
+    analysis: StockAnalysis,
+    market_state: str,
+    theme_bonus: int,
+    recent_high_20: float,
+    recent_high_60: float,
+) -> TargetPriceAnalysis:
+    price = analysis.current_price
+    stop_price = analysis.stop_price
+    if price is None or stop_price is None:
+        return TargetPriceAnalysis()
+
+    metrics = analysis.metrics
+    ma20 = metrics.get("ma20", price)
+    risk_unit = max(price - stop_price, price * 0.03)
+    box_top = max(recent_high_20, ma20 * 1.05, price * 1.03)
+
+    first_target = max(price + risk_unit, box_top)
+    first_target = min(max(first_target, price * 1.03), price * 1.20)
+
+    second_target = max(price + risk_unit * 2, first_target * 1.06, recent_high_60 * 1.03)
+    second_target = min(second_target, price * 1.35)
+    if second_target <= first_target:
+        second_target = first_target * 1.06
+
+    final_target = max(price + risk_unit * 3, second_target * 1.12, price * 1.20)
+    final_target = min(final_target, price * 1.70)
+    if final_target <= second_target:
+        final_target = second_target * 1.10
+
+    condition_score = target_condition_score(analysis, market_state, theme_bonus)
+    volume_ratio = metrics.get("volume_ratio", 1.0)
+    second_is_most_realistic = (
+        market_state == "상승장"
+        and theme_bonus > 0
+        and analysis.quant_score >= 75
+        and analysis.timing_score >= 60
+        and volume_ratio >= 1.0
+        and condition_score >= 75
+    )
+
+    if second_is_most_realistic:
+        emojis = ["🟡", "🟢", "🔴"]
+        most_realistic_label = "2차 목표가"
+    else:
+        emojis = ["🟢", "🟡", "🔴"]
+        most_realistic_label = "1차 목표가"
+
+    return TargetPriceAnalysis(
+        levels=[
+            TargetPriceLevel("1차 목표가", first_target, emojis[0]),
+            TargetPriceLevel("2차 목표가", second_target, emojis[1]),
+            TargetPriceLevel("최종 목표가", final_target, emojis[2]),
+        ],
+        most_realistic_label=most_realistic_label,
+        extension_note=select_target_extension_note(market_state, condition_score, theme_bonus),
+        condition_score=condition_score,
+    )
+
+
+def most_realistic_target_price(target_analysis: TargetPriceAnalysis) -> float | None:
+    for level in target_analysis.levels:
+        if level.label == target_analysis.most_realistic_label:
+            return level.price
+    if target_analysis.levels:
+        return target_analysis.levels[0].price
+    return None
+
+
+def position_target_price_analysis(
+    analysis: StockAnalysis,
+    average_price: float,
+    holding_target_price: float | None,
+) -> TargetPriceAnalysis:
+    base = analysis.target_analysis
+    if not base.levels or holding_target_price is None:
+        return base
+
+    first_price = max(base.levels[0].price or 0.0, holding_target_price)
+    second_price = max(base.levels[1].price or 0.0, first_price * 1.06, average_price * 1.22)
+    final_price = max(base.levels[2].price or 0.0, second_price * 1.10, average_price * 1.35)
+
+    return TargetPriceAnalysis(
+        levels=[
+            TargetPriceLevel(base.levels[0].label, first_price, base.levels[0].emoji),
+            TargetPriceLevel(base.levels[1].label, second_price, base.levels[1].emoji),
+            TargetPriceLevel(base.levels[2].label, final_price, base.levels[2].emoji),
+        ],
+        most_realistic_label=base.most_realistic_label,
+        extension_note=base.extension_note,
+        condition_score=base.condition_score,
+    )
+
+
 def analyze_stock(stock: dict[str, Any], strong_themes: list[str], market_state: str) -> StockAnalysis:
     name = stock["name"]
     ticker = stock["ticker"]
@@ -601,6 +780,7 @@ def analyze_stock(stock: dict[str, Any], strong_themes: list[str], market_state:
     try:
         history = fetch_history(ticker)
         close = history["Close"].astype(float)
+        high = history["High"].astype(float) if "High" in history.columns else close
         volume = history["Volume"].astype(float) if "Volume" in history.columns else pd.Series(dtype=float)
 
         price = latest_float(close)
@@ -621,6 +801,8 @@ def analyze_stock(stock: dict[str, Any], strong_themes: list[str], market_state:
         latest_volume = latest_float(volume, 0.0) or 0.0
         volume_ratio = latest_volume / avg_volume20 if avg_volume20 > 0 else 1.0
         price_vs_ma20 = ((price / ma20) - 1) * 100 if ma20 else 0.0
+        recent_high_20 = recent_high_value(high, price, 20)
+        recent_high_60 = recent_high_value(high, recent_high_20, 60)
 
         trend_score = 0
         trend_score += 20 if ma20 > ma60 else 8 if ma20 >= ma60 * 0.98 else 0
@@ -649,8 +831,6 @@ def analyze_stock(stock: dict[str, Any], strong_themes: list[str], market_state:
         stop_price = max(price * 0.92, ma20 * 0.95)
         if stop_price >= price:
             stop_price = price * 0.93
-        target_multiplier = 1.12 if market_state == "상승장" else 1.08
-        target_price = price * target_multiplier
         entry_low = min(price * 0.985, ma5 * 0.995)
         entry_high = price * (1.015 if timing_score >= 70 else 1.0)
 
@@ -662,7 +842,6 @@ def analyze_stock(stock: dict[str, Any], strong_themes: list[str], market_state:
         analysis.current_state = describe_current_state(price, ma5, ma20, ma60, rsi, volume_ratio)
         analysis.entry_zone = f"{format_price_for_ticker(entry_low, ticker)} ~ {format_price_for_ticker(entry_high, ticker)}"
         analysis.stop_price = stop_price
-        analysis.target_price = target_price
         analysis.metrics = {
             "ma5": ma5,
             "ma20": ma20,
@@ -672,7 +851,17 @@ def analyze_stock(stock: dict[str, Any], strong_themes: list[str], market_state:
             "volatility20": volatility20,
             "momentum20": momentum20,
             "price_vs_ma20": price_vs_ma20,
+            "recent_high_20": recent_high_20,
+            "recent_high_60": recent_high_60,
         }
+        analysis.target_analysis = build_target_price_analysis(
+            analysis=analysis,
+            market_state=market_state,
+            theme_bonus=theme_bonus,
+            recent_high_20=recent_high_20,
+            recent_high_60=recent_high_60,
+        )
+        analysis.target_price = most_realistic_target_price(analysis.target_analysis)
         analysis.final_action = choose_final_action(analysis, market_state)
         analysis.reason_bullets = build_reason_bullets(analysis, ma20, ma60, rsi, volume_ratio, theme_bonus)
         analysis.risk_bullets = build_risk_bullets(analysis, market_state)
@@ -878,6 +1067,29 @@ def append_price_block(lines: list[str], label: str, value: float | int | None, 
     lines.append("")
 
 
+def append_target_price_analysis(
+    lines: list[str],
+    analysis: StockAnalysis,
+    target_analysis: TargetPriceAnalysis | None = None,
+) -> None:
+    target_analysis = target_analysis or analysis.target_analysis
+    if not target_analysis.levels:
+        append_price_block(lines, "목표가", analysis.target_price, analysis.ticker)
+        return
+
+    lines.extend(section("🎯 목표가 분석"))
+    for level in target_analysis.levels:
+        price_text = format_price_for_ticker(level.price, analysis.ticker)
+        lines.append(f"{level.label}: {bold(price_text)} {level.emoji}")
+    lines.append("")
+    lines.append("가장 현실적인 목표:")
+    lines.append(bold(target_analysis.most_realistic_label))
+    lines.append("")
+    lines.append("확장 목표:")
+    lines.append(target_analysis.extension_note)
+    lines.append("")
+
+
 def append_risk_block(lines: list[str], action: str, market_state: str) -> None:
     lines.append("리스크:")
     lines.append("* 손절가 이탈 시 추세 훼손")
@@ -974,7 +1186,7 @@ def build_daily_report_messages(
             message1.append(item.entry_zone)
             message1.append("")
             append_price_block(message1, "손절가", item.stop_price)
-            append_price_block(message1, "목표가", item.target_price)
+            append_target_price_analysis(message1, item)
             message1.append("근거:")
             message1.append("")
             for reason in item.reason_bullets:
@@ -1019,7 +1231,8 @@ def build_daily_report_messages(
         message2.append(f"수익률: {bold(format_pct(profit_pct))}")
         message2.append(f"액션: {bold(action)}")
         message2.append("")
-        append_price_block(message2, "목표가", target_price, ticker)
+        holding_target_analysis = position_target_price_analysis(analysis, average_price, target_price)
+        append_target_price_analysis(message2, analysis, holding_target_analysis)
         append_price_block(message2, "손절가", stop_price, ticker)
         append_risk_block(message2, action, market.state)
         if analysis.error:
@@ -1147,7 +1360,7 @@ def stock_detail_report(query: str) -> str:
     lines.append(analysis.entry_zone)
     lines.append("")
     append_price_block(lines, "손절가", analysis.stop_price, analysis.ticker)
-    append_price_block(lines, "목표가", analysis.target_price, analysis.ticker)
+    append_target_price_analysis(lines, analysis)
     lines.append(f"최종 액션: {bold(analysis.final_action)}")
     lines.append("")
     lines.append("근거:")
