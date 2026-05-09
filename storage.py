@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from config import ALERTS_FILE, HOLDINGS_FILE, NEWS_SUMMARY_FILE, WATCHLIST_FILE
+from config import ALERTS_FILE, HOLDINGS_FILE, NEWS_SUMMARY_FILE, TICKER_MAP_FILE, WATCHLIST_FILE
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -79,6 +79,14 @@ def load_alerts(logger: Logger = None) -> list[dict[str, Any]]:
 
 def save_alerts(items: list[dict[str, Any]]) -> None:
     save_json_file(ALERTS_FILE, items)
+
+
+def load_ticker_map(logger: Logger = None) -> dict[str, str]:
+    payload = load_json_file(TICKER_MAP_FILE, {}, logger=logger)
+    if not isinstance(payload, dict):
+        log(logger, f"{TICKER_MAP_FILE} 로드 실패: 객체 형식이 아닙니다. 기본값으로 진행합니다.")
+        return {}
+    return {str(key): str(value) for key, value in payload.items()}
 
 
 def find_item(items: list[dict[str, Any]], query: str) -> dict[str, Any] | None:

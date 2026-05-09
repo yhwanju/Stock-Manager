@@ -10,6 +10,7 @@ WATCHLIST_FILE = "watchlist.json"
 HOLDINGS_FILE = "holdings.json"
 NEWS_SUMMARY_FILE = "news_summary.json"
 ALERTS_FILE = "alerts.json"
+TICKER_MAP_FILE = "ticker_map.json"
 
 HISTORY_PERIOD = "6mo"
 HISTORY_INTERVAL = "1d"

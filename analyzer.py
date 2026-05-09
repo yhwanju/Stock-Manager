@@ -109,6 +109,34 @@ def normalize_text(value: str) -> str:
     return value.lower().replace(" ", "").replace("/", "")
 
 
+def contains_hangul(value: str) -> bool:
+    return any("가" <= char <= "힣" for char in value)
+
+
+def normalize_ticker_symbol(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return text
+    if text.isdigit() and len(text) == 6:
+        return f"{text}.KS"
+    if contains_hangul(text):
+        return text
+    return text.upper()
+
+
+def resolve_ticker_from_map(query: str, ticker_map: dict[str, str]) -> str | None:
+    normalized_query = normalize_text(query)
+    for name, ticker in ticker_map.items():
+        normalized_ticker = normalize_text(ticker)
+        if normalize_text(name) == normalized_query:
+            return normalize_ticker_symbol(ticker)
+        if normalized_ticker == normalized_query:
+            return normalize_ticker_symbol(ticker)
+        if normalized_query.isdigit() and normalized_ticker.startswith(f"{normalized_query}."):
+            return normalize_ticker_symbol(ticker)
+    return None
+
+
 def fetch_history(ticker: str) -> pd.DataFrame:
     data = yf.Ticker(ticker).history(
         period=HISTORY_PERIOD,
@@ -720,9 +748,17 @@ def find_known_stock(query: str, context: AnalysisContext | None = None) -> dict
 
 def analyze_query_stock(query: str) -> tuple[StockAnalysis, AnalysisContext]:
     context = build_context()
-    stock = find_known_stock(query, context)
-    if not stock:
-        stock = {"name": query, "ticker": query}
+    ticker_map = storage.load_ticker_map()
+    mapped_ticker = resolve_ticker_from_map(query, ticker_map)
+    if mapped_ticker:
+        stock = {"name": query, "ticker": mapped_ticker}
+        return analyze_stock(stock, context.strong_themes, context.market.state), context
+
+    known_stock = find_known_stock(query, context)
+    if known_stock:
+        return analyze_stock(known_stock, context.strong_themes, context.market.state), context
+
+    stock = {"name": query, "ticker": normalize_ticker_symbol(query)}
     return analyze_stock(stock, context.strong_themes, context.market.state), context
 
 
@@ -748,6 +784,19 @@ def related_news_lines(stock: StockAnalysis, context: AnalysisContext) -> list[s
 
 def stock_detail_report(query: str) -> str:
     analysis, context = analyze_query_stock(query)
+    if analysis.error:
+        return (
+            "━━━━━━━━━━\n"
+            "**🔎 종목분석**\n"
+            "━━━━━━━━━━\n\n"
+            f"입력값: {bold(query)}\n"
+            "상태: **종목 또는 티커를 찾을 수 없습니다**\n\n"
+            "확인:\n"
+            "* 미국 주식은 `NVDA`, `PLTR`, `TSLA`, `CRCL`처럼 티커로 입력\n"
+            "* 한국 종목명은 `ticker_map.json`에 등록 필요\n"
+            "* 한국 6자리 종목코드는 `.KS` 또는 `.KQ` 포함 권장"
+        )
+
     lines: list[str] = []
     lines.extend(section("🔎 종목분석"))
     lines.append(f"종목명: {bold(analysis.name)}")
