@@ -71,6 +71,34 @@ pip install -r requirements.txt
 python discord_bot.py
 ```
 
+### Render 무료 Web Service 배포
+
+Render 무료 플랜에서는 Background Worker 대신 Web Service로 질문봇을 실행할 수 있습니다. `discord_bot.py`는 Discord 봇과 함께 Flask health check 서버를 별도 스레드로 실행해 Render가 열린 포트를 감지할 수 있게 합니다.
+
+Health check:
+
+```text
+GET /
+Bot is running
+```
+
+Render 설정:
+
+```text
+Build Command: pip install -r requirements.txt
+Start Command: python discord_bot.py
+```
+
+Environment Variables:
+
+```text
+DISCORD_BOT_TOKEN=Discord 봇 토큰
+DISCORD_GUILD_ID=테스트 서버 ID 선택
+PORT=Render가 자동 설정
+```
+
+`PORT`가 없으면 로컬 실행용 기본값 `10000`을 사용합니다. 실행 로그에서 `Flask health server started`, `Discord bot login started`, `Discord bot connected`가 보이면 정상입니다.
+
 지원 명령어:
 
 - `/기능`: 전체 명령어 목록

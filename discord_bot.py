@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from typing import Callable
 
 import discord
@@ -58,6 +59,29 @@ class StockManagerClient(discord.Client):
 client = StockManagerClient()
 
 
+def run_health_server() -> None:
+    try:
+        from flask import Flask
+
+        app = Flask(__name__)
+
+        @app.get("/")
+        def health_check() -> tuple[str, int]:
+            return "Bot is running", 200
+
+        port = int(os.getenv("PORT", "10000"))
+        print(f"[stock-question-bot] Flask health server started on port {port}", flush=True)
+        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    except Exception as exc:
+        print(f"[stock-question-bot] Flask health server failed: {exc}", flush=True)
+
+
+def start_health_server() -> threading.Thread:
+    thread = threading.Thread(target=run_health_server, name="flask-health-server", daemon=True)
+    thread.start()
+    return thread
+
+
 async def respond(interaction: discord.Interaction, handler: Callable, *args) -> None:
     await interaction.response.defer(thinking=True)
     try:
@@ -73,6 +97,7 @@ async def respond(interaction: discord.Interaction, handler: Callable, *args) ->
 
 @client.event
 async def on_ready() -> None:
+    print("[stock-question-bot] Discord bot connected", flush=True)
     print(f"[stock-question-bot] logged in as {client.user}", flush=True)
 
 
@@ -174,6 +199,8 @@ def main() -> int:
     token = os.getenv(BOT_TOKEN_ENV_NAME)
     if not token:
         raise RuntimeError(f"{BOT_TOKEN_ENV_NAME} 환경 변수가 설정되어 있지 않습니다.")
+    start_health_server()
+    print("[stock-question-bot] Discord bot login started", flush=True)
     client.run(token)
     return 0
 
