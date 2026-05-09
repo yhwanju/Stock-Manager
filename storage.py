@@ -169,6 +169,36 @@ def find_item(items: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
     return None
 
 
+def item_keys(item: dict[str, Any]) -> set[str]:
+    return {
+        normalize(str(value))
+        for value in (item.get("name"), item.get("ticker"))
+        if str(value or "").strip()
+    }
+
+
+def prune_watchlist_holdings_overlap(logger: Logger = None) -> list[dict[str, Any]]:
+    watchlist = load_watchlist()
+    holdings = load_holdings()
+    holding_keys: set[str] = set()
+    for holding in holdings:
+        holding_keys.update(item_keys(holding))
+
+    kept: list[dict[str, Any]] = []
+    removed: list[dict[str, Any]] = []
+    for item in watchlist:
+        if item_keys(item) & holding_keys:
+            removed.append(item)
+        else:
+            kept.append(item)
+
+    if removed:
+        save_watchlist(kept)
+        names = ", ".join(str(item.get("name", "-")) for item in removed)
+        log(logger, f"관심/보유 중복 정리 완료: {names}")
+    return removed
+
+
 def upsert_watchlist(
     name: str,
     ticker: str,
@@ -205,16 +235,31 @@ def delete_watchlist(query: str) -> dict[str, Any] | None:
     return target
 
 
-def upsert_holding(name: str, ticker: str, quantity: int, average_price: float) -> tuple[str, dict[str, Any]]:
+def upsert_holding(
+    name: str,
+    ticker: str,
+    quantity: int,
+    average_price: float,
+    themes: list[str] | None = None,
+    subthemes: list[str] | None = None,
+    non_priority_themes: list[str] | None = None,
+) -> tuple[str, dict[str, Any]]:
     items = load_holdings()
     existing = find_item(items, name) or find_item(items, ticker)
     payload = {
         "name": name,
         "ticker": ticker,
         "quantity": int(quantity),
-        "average_price": float(average_price),
+        "avg_price": float(average_price),
     }
+    if themes is not None:
+        payload["themes"] = themes
+    if subthemes is not None:
+        payload["subthemes"] = subthemes
+    if non_priority_themes:
+        payload["non_priority_themes"] = non_priority_themes
     if existing:
+        existing.clear()
         existing.update(payload)
         save_holdings(items)
         return "updated", existing

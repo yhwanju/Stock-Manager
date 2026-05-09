@@ -94,6 +94,10 @@ def format_pct(value: float | None) -> str:
     return f"{value:+.2f}%"
 
 
+def holding_average_price(holding: dict[str, Any]) -> float:
+    return float(holding.get("avg_price", holding.get("average_price", 0)) or 0)
+
+
 def bold(value: Any) -> str:
     return f"**{value}**"
 
@@ -704,7 +708,7 @@ def summarize_holding_action(holdings: list[dict[str, Any]], holding_analyses: d
         action, _, _ = holding_action(
             analysis,
             int(holding["quantity"]),
-            float(holding["average_price"]),
+            holding_average_price(holding),
             market_state,
         )
         actions.append(action)
@@ -735,6 +739,7 @@ def append_risk_block(lines: list[str], action: str, market_state: str) -> None:
 
 
 def build_context(logger: Logger = None) -> AnalysisContext:
+    storage.prune_watchlist_holdings_overlap(logger=logger)
     watchlist_items = storage.load_watchlist(logger=logger)
     holdings = storage.load_holdings(logger=logger)
     news_summary = storage.load_news_summary(logger=logger)
@@ -753,7 +758,14 @@ def build_context(logger: Logger = None) -> AnalysisContext:
 
 
 def analyze_watchlist(context: AnalysisContext) -> list[StockAnalysis]:
-    return [analyze_stock(stock, context.strong_themes, context.market.state) for stock in context.watchlist_items]
+    holding_keys: set[str] = set()
+    for holding in context.holdings:
+        holding_keys.update(storage.item_keys(holding))
+    candidates = [
+        stock for stock in context.watchlist_items
+        if not (storage.item_keys(stock) & holding_keys)
+    ]
+    return [analyze_stock(stock, context.strong_themes, context.market.state) for stock in candidates]
 
 
 def analyze_holdings(context: AnalysisContext) -> dict[str, StockAnalysis]:
@@ -843,7 +855,7 @@ def build_daily_report_messages(
         ticker = holding["ticker"]
         analysis = holding_analyses[ticker]
         quantity = int(holding["quantity"])
-        average_price = float(holding["average_price"])
+        average_price = holding_average_price(holding)
         action, stop_price, target_price = holding_action(analysis, quantity, average_price, market.state)
         profit_pct = None
         if analysis.current_price:
@@ -1007,8 +1019,13 @@ def strong_theme_stock_names() -> str:
     ]
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
+    holding_keys: set[str] = set()
+    for holding in context.holdings:
+        holding_keys.update(storage.item_keys(holding))
 
     for stock in context.watchlist_items:
+        if storage.item_keys(stock) & holding_keys:
+            continue
         if strong_priority_themes and not any(stock_matches_theme(stock, theme, context.theme_config) for theme in strong_priority_themes):
             continue
         ticker = str(stock.get("ticker", ""))
@@ -1017,6 +1034,8 @@ def strong_theme_stock_names() -> str:
             seen.add(ticker)
 
     for stock in theme_representatives(context.theme_config, strong_priority_themes):
+        if storage.item_keys(stock) & holding_keys:
+            continue
         ticker = str(stock.get("ticker", ""))
         if ticker and ticker not in seen:
             candidates.append(stock)
@@ -1037,6 +1056,7 @@ def strong_theme_stock_names() -> str:
 
 
 def watchlist_text() -> str:
+    storage.prune_watchlist_holdings_overlap()
     items = storage.load_watchlist()
     theme_config = storage.load_theme_config()
     lines = section("⭐ 관심종목 목록")
@@ -1071,6 +1091,7 @@ def watchlist_text() -> str:
 
 
 def holdings_text() -> str:
+    storage.prune_watchlist_holdings_overlap()
     items = storage.load_holdings()
     lines = section("💼 보유목록")
     if not items:
@@ -1080,7 +1101,7 @@ def holdings_text() -> str:
         lines.append(f"티커: {bold(item.get('ticker', '-'))}")
         quantity_text = f"{int(item.get('quantity', 0)):,}주"
         lines.append(f"보유수량: {bold(quantity_text)}")
-        lines.append(f"평단: {bold(format_krw(float(item.get('average_price', 0))))}")
+        lines.append(f"평단: {bold(format_krw(holding_average_price(item)))}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -1098,7 +1119,7 @@ def portfolio_check_report() -> str:
         total_value += value
         profit_pct = None
         if analysis.current_price:
-            profit_pct = ((analysis.current_price / float(holding["average_price"])) - 1) * 100
+            profit_pct = ((analysis.current_price / holding_average_price(holding)) - 1) * 100
         rows.append((holding, analysis, value, profit_pct))
         themes, _, _ = normalize_stock_theme_fields(holding, context.theme_config)
         for theme in themes or ["미분류"]:
@@ -1111,7 +1132,7 @@ def portfolio_check_report() -> str:
 
     for holding, analysis, value, profit_pct in rows:
         weight = (value / total_value * 100) if total_value else 0
-        action, _, _ = holding_action(analysis, int(holding["quantity"]), float(holding["average_price"]), context.market.state)
+        action, _, _ = holding_action(analysis, int(holding["quantity"]), holding_average_price(holding), context.market.state)
         lines.append(f"종목명: {bold(holding['name'])}")
         lines.append(f"평가금액: {bold(format_krw(value))}")
         lines.append(f"수익률: {bold(format_pct(profit_pct))}")
