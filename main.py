@@ -8,6 +8,7 @@ import requests
 
 from analyzer import build_daily_reports
 from config import DISCORD_CONTENT_LIMIT, KST, WEBHOOK_ENV_NAME
+import storage
 
 
 def log(message: str) -> None:
@@ -101,6 +102,7 @@ def main() -> int:
 
     log(f"실행 이벤트: {event_name}")
     log(f"현재 시각: {now:%Y-%m-%d %H:%M:%S} KST")
+    storage.run_daily_backup_if_due(logger=log)
 
     if should_skip_for_weekend(now, event_name, args.force_weekend):
         log(f"발송 스킵: schedule 실행이고 {now:%Y-%m-%d} KST가 주말입니다.")

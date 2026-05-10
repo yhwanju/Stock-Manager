@@ -39,6 +39,7 @@ class TargetPriceAnalysis:
     most_realistic_label: str = "-"
     extension_note: str = "강한 테마 지속 시 최종 목표가 가능"
     condition_score: int = 0
+    confidence_score: int = 0
 
 
 @dataclass
@@ -239,7 +240,8 @@ def resolve_theme_inputs(value: str | list[str] | None, theme_config: dict[str, 
             if canonical not in themes:
                 themes.append(canonical)
             meta = priority_meta.get(canonical, {}) if isinstance(priority_meta, dict) else {}
-            for subtheme in meta.get("subthemes", []) if isinstance(meta, dict) else []:
+            meta_subthemes = meta.get("subthemes", []) if isinstance(meta, dict) else []
+            for subtheme in meta_subthemes:
                 if normalize_text(raw_theme) == normalize_text(str(subtheme)) and raw_theme not in subthemes:
                     subthemes.append(raw_theme)
         else:
@@ -755,6 +757,7 @@ def build_target_price_analysis(
         most_realistic_label=most_realistic_label,
         extension_note=select_target_extension_note(market_state, condition_score, theme_bonus),
         condition_score=condition_score,
+        confidence_score=condition_score,
     )
 
 
@@ -789,6 +792,7 @@ def position_target_price_analysis(
         most_realistic_label=base.most_realistic_label,
         extension_note=base.extension_note,
         condition_score=base.condition_score,
+        confidence_score=base.confidence_score,
     )
 
 
@@ -1106,6 +1110,10 @@ def append_target_price_analysis(
     lines.append("가장 현실적인 목표:")
     lines.append(bold(target_analysis.most_realistic_label))
     lines.append("")
+    confidence_score = target_analysis.confidence_score or target_analysis.condition_score
+    lines.append("신뢰도:")
+    lines.append(bold(f"{confidence_score} / 100"))
+    lines.append("")
     lines.append("확장 목표:")
     lines.append(target_analysis.extension_note)
     lines.append("")
@@ -1275,6 +1283,7 @@ def select_top_recommendations(watchlist: list[StockAnalysis]) -> list[StockAnal
 def record_recommendation_history(
     market: MarketSummary,
     recommendations: list[StockAnalysis],
+    strong_themes: list[str] | None = None,
     logger: Logger = None,
 ) -> None:
     if not recommendations:
@@ -1290,12 +1299,21 @@ def record_recommendation_history(
             for item in history
         }
         added = 0
+        strong_theme_keys = {normalize_text(theme) for theme in (strong_themes or [])}
         for item in recommendations:
             key = (today, item.ticker)
             if key in existing_keys:
                 continue
+            levels = item.target_analysis.levels
+            target_1 = levels[0].price if len(levels) >= 1 else item.target_price
+            target_2 = levels[1].price if len(levels) >= 2 else item.target_price
+            target_final = levels[2].price if len(levels) >= 3 else item.target_price
+            confidence_score = item.target_analysis.confidence_score or item.target_analysis.condition_score or item.composite_score
+            matched_theme_count = sum(1 for theme in item.themes if normalize_text(theme) in strong_theme_keys)
+            theme_strength = clamp((matched_theme_count * 35) + (10 if item.themes else 0) + (confidence_score * 0.35))
             history.append(
                 {
+                    "recommendation_id": f"{today}-{item.ticker}",
                     "date": f"{now:%Y-%m-%d %H:%M:%S} KST",
                     "name": item.name,
                     "ticker": item.ticker,
@@ -1304,8 +1322,20 @@ def record_recommendation_history(
                     "quant_score": item.quant_score,
                     "timing_score": item.timing_score,
                     "market_state": market.state,
+                    "theme_strength": theme_strength,
+                    "confidence_score": confidence_score,
+                    "predicted_best_target": item.target_analysis.most_realistic_label,
+                    "actual_best_target": "",
+                    "target_1": target_1,
+                    "target_2": target_2,
+                    "target_final": target_final,
                     "target_price": item.target_price,
                     "stop_price": item.stop_price,
+                    "hit_target_1": False,
+                    "hit_target_2": False,
+                    "hit_target_final": False,
+                    "hit_stop_loss": False,
+                    "prediction_result": "PENDING",
                     "themes": item.themes,
                     "memo": "daily_report_top3",
                 }
@@ -1340,7 +1370,12 @@ def build_daily_reports(logger: Logger = None, record_recommendations: bool = Fa
         holding_analyses=holding_analyses,
     )
     if record_recommendations:
-        record_recommendation_history(context.market, select_top_recommendations(watchlist), logger=logger)
+        record_recommendation_history(
+            context.market,
+            select_top_recommendations(watchlist),
+            context.strong_themes,
+            logger=logger,
+        )
     log(logger, f"리포트 생성 완료: 메시지1 {len(reports[0])}자, 메시지2 {len(reports[1])}자")
     return reports
 
@@ -1572,6 +1607,12 @@ def portfolio_check_report() -> str:
     total_value = 0.0
     rows: list[tuple[dict[str, Any], StockAnalysis, float, float | None, float | None, float]] = []
     theme_values: dict[str, float] = {}
+    country_values: dict[str, float] = {}
+    currency_values: dict[str, float] = {}
+    style_values: dict[str, float] = {}
+    volatility_values: list[float] = []
+    growth_themes = {"AI", "반도체", "전력", "원전", "2차전지", "ESS", "우주항공", "방산", "바이오/제약", "로봇", "자율주행"}
+    defensive_themes = {"음식료", "금융"}
     for holding in context.holdings:
         analysis = holding_analyses[holding["ticker"]]
         quantity = int(holding["quantity"])
@@ -1588,6 +1629,20 @@ def portfolio_check_report() -> str:
         themes, _, _ = normalize_stock_theme_fields(holding, context.theme_config)
         for theme in themes or ["미분류"]:
             theme_values[theme] = theme_values.get(theme, 0.0) + value
+        ticker = str(holding.get("ticker", ""))
+        country = "한국" if is_korean_stock_ticker(ticker) else "미국"
+        currency = "KRW" if is_korean_stock_ticker(ticker) else "USD"
+        country_values[country] = country_values.get(country, 0.0) + value
+        currency_values[currency] = currency_values.get(currency, 0.0) + value
+        theme_set = set(themes)
+        if theme_set & defensive_themes and not theme_set & growth_themes:
+            style = "방어주"
+        elif theme_set & growth_themes:
+            style = "성장주"
+        else:
+            style = "중립"
+        style_values[style] = style_values.get(style, 0.0) + value
+        volatility_values.append(float(analysis.metrics.get("volatility20", 0.0) or 0.0))
 
     lines = section("📦 포트폴리오점검")
     if not rows:
@@ -1616,8 +1671,52 @@ def portfolio_check_report() -> str:
         lines.append("* 미분류")
     lines.append("")
 
+    def append_weight_block(title: str, values: dict[str, float]) -> None:
+        lines.append(f"{title}:")
+        if values and total_value:
+            for label, value in sorted(values.items(), key=lambda item: item[1], reverse=True):
+                lines.append(f"* {label}: {value / total_value * 100:.1f}%")
+        else:
+            lines.append("* 산출 불가")
+        lines.append("")
+
+    append_weight_block("국가별 비중", country_values)
+    append_weight_block("KRW/USD 노출", currency_values)
+    append_weight_block("성장주/방어주 비중", style_values)
+
     top_theme, top_value = max(theme_values.items(), key=lambda item: item[1]) if theme_values else ("분산", 0.0)
     top_weight = top_value / total_value * 100 if total_value else 0.0
+    largest_position_weight = max((value / total_value * 100 for _, _, value, _, _, _ in rows), default=0.0) if total_value else 0.0
+    growth_weight = style_values.get("성장주", 0.0) / total_value * 100 if total_value else 0.0
+    defensive_weight = style_values.get("방어주", 0.0) / total_value * 100 if total_value else 0.0
+    max_volatility = max(volatility_values, default=0.0)
+    risk_score = 20
+    if top_weight >= 60:
+        risk_score += 30
+    elif top_weight >= 45:
+        risk_score += 20
+    elif top_weight >= 35:
+        risk_score += 10
+    if largest_position_weight >= 40:
+        risk_score += 20
+    elif largest_position_weight >= 30:
+        risk_score += 12
+    if context.market.state == "하락장":
+        risk_score += 20
+    elif context.market.state == "변동성 확대장":
+        risk_score += 12
+    if growth_weight >= 80:
+        risk_score += 12
+    if defensive_weight < 10:
+        risk_score += 8
+    if max_volatility >= 0.04:
+        risk_score += 10
+    risk_score = clamp(risk_score)
+    risk_label = "🟢 안정" if risk_score < 40 else "🟡 주의" if risk_score < 70 else "🔴 위험"
+    risk_score_text = f"{risk_score} / 100 {risk_label}"
+    lines.append(f"포트폴리오 리스크 점수: {bold(risk_score_text)}")
+    lines.append("")
+
     missing_core = [
         theme for theme in priority_theme_names(context.theme_config)
         if theme not in theme_values
@@ -1627,6 +1726,18 @@ def portfolio_check_report() -> str:
         lines.append(f"* {top_theme} 비중 과다: {top_weight:.1f}%")
     else:
         lines.append(f"* 최대 노출 테마: {top_theme} {top_weight:.1f}%")
+    ai_weight = theme_values.get("AI", 0.0) / total_value * 100 if total_value else 0.0
+    battery_weight = theme_values.get("2차전지", 0.0) / total_value * 100 if total_value else 0.0
+    if ai_weight >= 35:
+        lines.append("* AI 인프라 집중")
+    if battery_weight >= 35:
+        lines.append("* 2차전지 비중 과다")
+    if "원자재" not in theme_values:
+        lines.append("* 원자재 노출 부족")
+    if defensive_weight < 10:
+        lines.append("* 방어주 부족")
+    if max_volatility >= 0.04:
+        lines.append("* 변동성 위험 높음")
     if missing_core:
         lines.append(f"* 노출 없음: {', '.join(missing_core)}")
     lines.append(f"* 현금 비중 제안: {context.market.cash_recommendation}")
@@ -1753,3 +1864,121 @@ def build_deep_analysis_candidates(max_count: int | None = None) -> list[dict[st
             if len(candidates) >= limit:
                 return candidates
     return candidates
+
+
+def build_condition_search_candidates(context: AnalysisContext, max_count: int | None = None) -> list[dict[str, Any]]:
+    limit = max_count or int(context.theme_config.get("max_deep_analysis_candidates", 50) or 50)
+    strong_priority_themes = [
+        theme for theme in context.strong_themes
+        if is_priority_theme(theme, context.theme_config)
+    ]
+    pools = [
+        context.watchlist_items,
+        context.holdings,
+        theme_representatives(context.theme_config),
+        theme_representatives(context.theme_config, strong_priority_themes),
+    ]
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for pool in pools:
+        for item in pool:
+            ticker = str(item.get("ticker", ""))
+            if not ticker:
+                continue
+            key = normalize_text(ticker)
+            if key in seen:
+                continue
+            candidates.append(item)
+            seen.add(key)
+            if len(candidates) >= limit:
+                return candidates
+    return candidates
+
+
+def condition_match(condition: str, analysis: StockAnalysis, theme_config: dict[str, Any]) -> tuple[bool, list[str]]:
+    key = normalize_text(condition)
+    metrics = analysis.metrics
+    price = analysis.current_price or 0.0
+    ma20 = metrics.get("ma20", price)
+    ma60 = metrics.get("ma60", ma20)
+    volume_ratio = metrics.get("volume_ratio", 1.0)
+    price_vs_ma20 = metrics.get("price_vs_ma20", 0.0)
+    recent_high_20 = metrics.get("recent_high_20", price)
+    momentum20 = metrics.get("momentum20", 0.0)
+    change_pct = analysis.change_pct or 0.0
+
+    if analysis.error or not price:
+        return False, ["시세 데이터 오류"]
+
+    if key == normalize_text("눌림목"):
+        matched = abs(price_vs_ma20) <= 5 and ma20 >= ma60 * 0.98 and volume_ratio <= 1.25 and price >= ma60
+        reasons = ["20일선 근처", "추세 유지", "거래량 과열 낮음"]
+        return matched, reasons
+
+    if key == normalize_text("거래량급증"):
+        matched = volume_ratio >= 1.8 and change_pct >= 0
+        reasons = ["평균 대비 거래량 증가", "양봉/상승 흐름", "단기 수급 유입"]
+        return matched, reasons
+
+    if key == normalize_text("전고돌파"):
+        matched = price >= recent_high_20 * 0.98 and volume_ratio >= 1.1
+        reasons = ["최근 고점 돌파 시도", "거래량 동반", "추세 확인 필요"]
+        return matched, reasons
+
+    if key == normalize_text("추세상승"):
+        matched = ma20 > ma60 and price > ma20 and momentum20 >= 0 and analysis.quant_score >= 60
+        reasons = ["20일선 > 60일선", "현재가 20일선 상회", "중기 추세 우위"]
+        return matched, reasons
+
+    canonical = canonical_theme(condition, theme_config)
+    if canonical in priority_theme_names(theme_config) or condition:
+        matched = stock_matches_theme(analysis, canonical, theme_config)
+        reasons = [f"{canonical} 테마 후보", "관심/보유/대표종목 후보군", "점수 상위 우선"]
+        return matched, reasons
+
+    return False, ["지원하지 않는 조건"]
+
+
+def condition_search_report(condition: str) -> str:
+    context = build_context()
+    candidates = build_condition_search_candidates(context)
+    matched: list[tuple[StockAnalysis, list[str]]] = []
+    for stock in candidates:
+        analysis = analyze_stock(stock, context.strong_themes, context.market.state)
+        ok, reasons = condition_match(condition, analysis, context.theme_config)
+        if ok:
+            matched.append((analysis, reasons))
+
+    ranked = sorted(
+        matched,
+        key=lambda pair: (pair[0].composite_score, pair[0].timing_score, pair[0].quant_score),
+        reverse=True,
+    )[:10]
+
+    lines = section("🔎 조건검색")
+    lines.append(f"조건: {bold(condition)}")
+    candidate_count_text = f"{len(candidates)}개"
+    lines.append(f"분석 후보: {bold(candidate_count_text)}")
+    lines.append("")
+    if not ranked:
+        lines.append("조건에 맞는 종목 없음")
+        lines.append("")
+        lines.append("지원 조건:")
+        lines.append("* 눌림목")
+        lines.append("* 거래량급증")
+        lines.append("* 전고돌파")
+        lines.append("* 추세상승")
+        lines.append("* AI, 전력 등 우선 테마")
+        return "\n".join(lines).strip()
+
+    for analysis, reasons in ranked:
+        lines.append(f"종목명: {bold(analysis.name)}")
+        lines.append(f"퀀트 점수: {bold(analysis.quant_score)}")
+        lines.append(f"매매 타이밍 점수: {bold(analysis.timing_score)}")
+        lines.append(f"액션: {bold(analysis.final_action)}")
+        lines.append("근거:")
+        for reason in reasons[:3]:
+            lines.append(f"* {reason}")
+        lines.append("")
+    return "\n".join(lines).strip()

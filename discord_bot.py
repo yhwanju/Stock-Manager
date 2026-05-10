@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+from datetime import datetime, timedelta
 from typing import Callable
 
 import discord
 from discord import app_commands
 
 import bot_commands
-from config import BOT_TOKEN_ENV_NAME, DISCORD_CONTENT_LIMIT
+import storage
+from config import BOT_TOKEN_ENV_NAME, DISCORD_CONTENT_LIMIT, KST
 
 
 def split_message(content: str, limit: int = DISCORD_CONTENT_LIMIT) -> list[str]:
@@ -43,8 +45,11 @@ class StockManagerClient(discord.Client):
     def __init__(self) -> None:
         super().__init__(intents=discord.Intents.default())
         self.tree = app_commands.CommandTree(self)
+        self.backup_task: asyncio.Task | None = None
 
     async def setup_hook(self) -> None:
+        if self.backup_task is None or self.backup_task.done():
+            self.backup_task = asyncio.create_task(daily_backup_scheduler())
         guild_id = os.getenv("DISCORD_GUILD_ID")
         if guild_id:
             guild = discord.Object(id=int(guild_id))
@@ -60,6 +65,20 @@ class StockManagerClient(discord.Client):
 
 
 client = StockManagerClient()
+
+
+async def daily_backup_scheduler() -> None:
+    while True:
+        now = datetime.now(KST)
+        next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        await asyncio.sleep(max(60, (next_run - now).total_seconds()))
+        try:
+            storage.run_daily_backup_if_due(force=True)
+            print("[stock-question-bot] daily local backup completed", flush=True)
+        except Exception as exc:
+            print(f"[stock-question-bot] daily local backup failed: {exc}", flush=True)
 
 
 def run_health_server() -> None:
@@ -229,6 +248,12 @@ async def portfolio_check_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.portfolio_check)
 
 
+@client.tree.command(name="조건검색", description="관심/보유/테마 대표종목 안에서 조건 후보를 찾습니다.")
+@app_commands.describe(조건="눌림목, 거래량급증, 전고돌파, 추세상승, AI, 전력")
+async def condition_search_command(interaction: discord.Interaction, 조건: str) -> None:
+    await respond(interaction, bot_commands.condition_search, 조건)
+
+
 @client.tree.command(name="시장상태", description="현재 시장 상태와 현금 비중 전략을 보여줍니다.")
 async def market_status_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.market_status)
@@ -266,6 +291,7 @@ def main() -> int:
     token = os.getenv(BOT_TOKEN_ENV_NAME)
     if not token:
         raise RuntimeError(f"{BOT_TOKEN_ENV_NAME} 환경 변수가 설정되어 있지 않습니다.")
+    storage.run_daily_backup_if_due()
     start_health_server()
     print("[stock-question-bot] Discord bot login started", flush=True)
     client.run(token)

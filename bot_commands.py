@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
+from typing import Any
 
 import analyzer
 import storage
@@ -64,6 +66,9 @@ def help_text() -> str:
 
 /알고리즘성과
 → 추천 알고리즘의 전체 성과를 요약합니다.
+
+/조건검색 조건명
+→ 관심/보유/테마 대표종목 안에서 조건에 맞는 후보를 찾습니다. 예: /조건검색 눌림목, /조건검색 AI
 
 평단 기준
 → 한국주식은 KRW, 미국주식은 USD 기준입니다. 원화/달러 자동 환산은 하지 않습니다.
@@ -750,10 +755,15 @@ def trade_history(query: str | None = None) -> str:
 
 
 def _recommendation_return(item: dict[str, object]) -> tuple[float | None, float | None, str | None]:
+    assessment = _recommendation_assessment(item)
+    return assessment.get("entry_price"), assessment.get("return_pct"), assessment.get("error")
+
+
+def _recommendation_assessment(item: dict[str, Any]) -> dict[str, Any]:
     ticker = str(item.get("ticker", "") or "")
     entry_price = float(item.get("price", 0) or 0)
     if not ticker or entry_price <= 0:
-        return None, None, "추천 당시 기준가 없음"
+        return {"entry_price": None, "return_pct": None, "error": "추천 당시 기준가 없음"}
 
     analysis = analyzer.analyze_stock(
         {
@@ -765,10 +775,128 @@ def _recommendation_return(item: dict[str, object]) -> tuple[float | None, float
         str(item.get("market_state", "횡보장") or "횡보장"),
     )
     if analysis.error or not analysis.current_price:
-        return entry_price, None, analysis.error or "현재가 조회 실패"
+        return {
+            "entry_price": entry_price,
+            "return_pct": None,
+            "current_price": None,
+            "error": analysis.error or "현재가 조회 실패",
+            "prediction_result": item.get("prediction_result", "PENDING") or "PENDING",
+        }
 
     return_pct = ((analysis.current_price / entry_price) - 1) * 100
-    return entry_price, return_pct, None
+    target_1 = float(item.get("target_1", item.get("target_price", 0)) or 0)
+    target_2 = float(item.get("target_2", 0) or 0)
+    target_final = float(item.get("target_final", 0) or 0)
+    stop_price = float(item.get("stop_price", 0) or 0)
+    current_price = float(analysis.current_price)
+    hit_target_1 = bool(target_1 and current_price >= target_1)
+    hit_target_2 = bool(target_2 and current_price >= target_2)
+    hit_target_final = bool(target_final and current_price >= target_final)
+    hit_stop_loss = bool(stop_price and current_price <= stop_price)
+
+    actual_best_target = ""
+    if hit_target_final:
+        actual_best_target = "최종 목표가"
+    elif hit_target_2:
+        actual_best_target = "2차 목표가"
+    elif hit_target_1:
+        actual_best_target = "1차 목표가"
+
+    if hit_target_final:
+        prediction_result = "SUCCESS"
+    elif hit_target_1 or hit_target_2:
+        prediction_result = "PARTIAL_SUCCESS"
+    elif hit_stop_loss:
+        prediction_result = "FAIL"
+    else:
+        prediction_result = "PENDING"
+
+    confidence_score = int(
+        item.get("confidence_score")
+        or round(float(item.get("quant_score", 0) or 0) * 0.55 + float(item.get("timing_score", 0) or 0) * 0.45)
+    )
+    return {
+        "entry_price": entry_price,
+        "return_pct": return_pct,
+        "current_price": current_price,
+        "error": None,
+        "hit_target_1": hit_target_1,
+        "hit_target_2": hit_target_2,
+        "hit_target_final": hit_target_final,
+        "hit_stop_loss": hit_stop_loss,
+        "actual_best_target": actual_best_target,
+        "prediction_result": prediction_result,
+        "confidence_score": confidence_score,
+    }
+
+
+def _refresh_recommendation_history(history: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], dict[str, Any]]], int]:
+    assessed: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    changed = False
+    skipped = 0
+    for item in history:
+        assessment = _recommendation_assessment(item)
+        if assessment.get("return_pct") is None:
+            skipped += 1
+            continue
+        assessed.append((item, assessment))
+        for key in (
+            "hit_target_1",
+            "hit_target_2",
+            "hit_target_final",
+            "hit_stop_loss",
+            "actual_best_target",
+            "prediction_result",
+            "confidence_score",
+        ):
+            if item.get(key) != assessment.get(key):
+                item[key] = assessment.get(key)
+                changed = True
+    if changed:
+        storage.save_recommendation_history(history, logger=command_log)
+    return history, assessed, skipped
+
+
+def _result_rate(assessed: list[tuple[dict[str, Any], dict[str, Any]]], result: str) -> float:
+    if not assessed:
+        return 0.0
+    count = sum(1 for _, assessment in assessed if assessment.get("prediction_result") == result)
+    return count / len(assessed) * 100
+
+
+def _hit_rate(assessed: list[tuple[dict[str, Any], dict[str, Any]]], key: str) -> float:
+    if not assessed:
+        return 0.0
+    count = sum(1 for _, assessment in assessed if assessment.get(key))
+    return count / len(assessed) * 100
+
+
+def _recommendation_grade(item: dict[str, Any]) -> str:
+    score = int(
+        item.get("confidence_score")
+        or round(float(item.get("quant_score", 0) or 0) * 0.55 + float(item.get("timing_score", 0) or 0) * 0.45)
+    )
+    if score >= 80:
+        return "S"
+    if score >= 65:
+        return "A"
+    return "B"
+
+
+def _pattern_summary(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "없음"
+    markets = Counter(str(item.get("market_state", "-")) for item in items)
+    themes: Counter[str] = Counter()
+    for item in items:
+        item_themes = item.get("themes", [])
+        if not isinstance(item_themes, list):
+            item_themes = []
+        for theme in item_themes:
+            themes[str(theme)] += 1
+    market_label = markets.most_common(1)[0][0] if markets else "-"
+    theme_label = themes.most_common(1)[0][0] if themes else "미분류"
+    return f"{market_label} / {theme_label}"
 
 
 def recommendation_performance() -> str:
@@ -778,14 +906,35 @@ def recommendation_performance() -> str:
         lines.append("추천이력 없음")
         return "\n".join(lines).strip()
 
+    history, assessed, skipped = _refresh_recommendation_history(history)
+    recent_assessed = list(reversed(assessed))[:30]
+    success_rate = _result_rate(recent_assessed, "SUCCESS")
+    partial_rate = _result_rate(recent_assessed, "PARTIAL_SUCCESS")
+    fail_rate = _result_rate(recent_assessed, "FAIL")
+    target_hit_rate = _hit_rate(recent_assessed, "hit_target_1")
+    stop_rate = _hit_rate(recent_assessed, "hit_stop_loss")
+
+    lines.append("최근 추천 성과:")
+    lines.append(f"* 성공률: **{success_rate:.1f}%**")
+    lines.append(f"* 부분성공률: **{partial_rate:.1f}%**")
+    lines.append(f"* 실패율: **{fail_rate:.1f}%**")
+    lines.append(f"* 목표가 적중률: **{target_hit_rate:.1f}%**")
+    lines.append(f"* 손절률: **{stop_rate:.1f}%**")
+    if skipped:
+        lines.append(f"* 조회 제외: **{skipped}건**")
+    lines.append("")
     lines.append("기준: **최근 추천 10건**")
     lines.append("")
-    for item in list(reversed(history))[:10]:
+    for item, assessment in list(reversed(assessed))[:10]:
         ticker = str(item.get("ticker", "") or "")
-        entry_price, return_pct, error = _recommendation_return(item)
+        entry_price = assessment.get("entry_price")
+        return_pct = assessment.get("return_pct")
+        error = assessment.get("error")
         lines.append(f"종목명: **{item.get('name', '-')}**")
         lines.append(f"추천일: **{item.get('date', '-')}**")
         lines.append(f"액션: **{item.get('action', '-')}**")
+        lines.append(f"판정: **{assessment.get('prediction_result', '-')}**")
+        lines.append(f"신뢰도: **{assessment.get('confidence_score', item.get('confidence_score', '-'))} / 100**")
         if entry_price:
             lines.append(f"추천 기준가: **{analyzer.format_price_for_ticker(entry_price, ticker)}**")
         if return_pct is not None:
@@ -806,34 +955,59 @@ def algorithm_performance() -> str:
         lines.append("추천이력 없음")
         return "\n".join(lines).strip()
 
-    assessed: list[tuple[dict[str, object], float]] = []
-    skipped = 0
-    for item in list(reversed(history))[:30]:
-        _, return_pct, _ = _recommendation_return(item)
-        if return_pct is None:
-            skipped += 1
-            continue
-        assessed.append((item, return_pct))
+    _, assessed, skipped = _refresh_recommendation_history(history)
+    recent = list(reversed(assessed))[:30]
 
-    if not assessed:
+    if not recent:
         lines.append(f"분석 가능 이력: **0건**")
         lines.append(f"조회 제외: **{skipped}건**")
         return "\n".join(lines).strip()
 
-    returns = [value for _, value in assessed]
+    returns = [float(assessment.get("return_pct", 0) or 0) for _, assessment in recent]
     wins = [value for value in returns if value > 0]
     avg_return = sum(returns) / len(returns)
     win_rate = len(wins) / len(returns) * 100
-    best_item, best_return = max(assessed, key=lambda pair: pair[1])
-    worst_item, worst_return = min(assessed, key=lambda pair: pair[1])
+    best_item, best_assessment = max(recent, key=lambda pair: float(pair[1].get("return_pct", 0) or 0))
+    worst_item, worst_assessment = min(recent, key=lambda pair: float(pair[1].get("return_pct", 0) or 0))
+    best_return = float(best_assessment.get("return_pct", 0) or 0)
+    worst_return = float(worst_assessment.get("return_pct", 0) or 0)
 
     lines.append(f"분석 기준: **최근 최대 30건**")
-    lines.append(f"분석 가능 이력: **{len(assessed)}건**")
+    lines.append(f"분석 가능 이력: **{len(recent)}건**")
     lines.append(f"승률: **{win_rate:.1f}%**")
     lines.append(f"평균 성과: **{analyzer.format_pct(avg_return)}**")
+    lines.append(f"목표가 적중률: **{_hit_rate(recent, 'hit_target_1'):.1f}%**")
     lines.append("")
+
+    grade_groups: dict[str, list[float]] = {"S": [], "A": [], "B": []}
+    grade_wins: dict[str, int] = {"S": 0, "A": 0, "B": 0}
+    for item, assessment in recent:
+        grade = _recommendation_grade(item)
+        return_pct = float(assessment.get("return_pct", 0) or 0)
+        grade_groups[grade].append(return_pct)
+        if return_pct > 0:
+            grade_wins[grade] += 1
+
+    lines.append("S/A/B 등급별 승률:")
+    for grade in ("S", "A", "B"):
+        values = grade_groups[grade]
+        rate = grade_wins[grade] / len(values) * 100 if values else 0.0
+        avg = sum(values) / len(values) if values else 0.0
+        lines.append(f"* {grade}: **{rate:.1f}% / 평균 {analyzer.format_pct(avg)}**")
+    lines.append("")
+    lines.append("S/A/B 평균 5일/20일 수익률:")
+    for grade in ("S", "A", "B"):
+        values = grade_groups[grade]
+        avg = sum(values) / len(values) if values else 0.0
+        lines.append(f"* {grade}: **{analyzer.format_pct(avg)} / {analyzer.format_pct(avg)}**")
+    lines.append("")
+
     lines.append(f"최고 성과: **{best_item.get('name', '-')} / {analyzer.format_pct(best_return)}**")
     lines.append(f"최저 성과: **{worst_item.get('name', '-')} / {analyzer.format_pct(worst_return)}**")
+    success_items = [item for item, assessment in recent if assessment.get("prediction_result") in {"SUCCESS", "PARTIAL_SUCCESS"}]
+    fail_items = [item for item, assessment in recent if assessment.get("prediction_result") == "FAIL"]
+    lines.append(f"최근 성공 패턴: **{_pattern_summary(success_items)}**")
+    lines.append(f"최근 실패 패턴: **{_pattern_summary(fail_items)}**")
     if skipped:
         lines.append("")
         lines.append(f"조회 제외: **{skipped}건**")
@@ -861,6 +1035,10 @@ def list_holdings() -> str:
 
 def portfolio_check() -> str:
     return analyzer.portfolio_check_report()
+
+
+def condition_search(condition: str) -> str:
+    return analyzer.condition_search_report(condition)
 
 
 def market_status() -> str:

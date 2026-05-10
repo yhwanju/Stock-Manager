@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,8 +22,13 @@ from config import (
 
 PROJECT_ROOT = Path(__file__).resolve(strict=True).parent
 DATA_DIR = (PROJECT_ROOT / "data").resolve()
+LOG_DIR = (PROJECT_ROOT / "logs").resolve()
+BACKUP_DIR = (PROJECT_ROOT / "backups").resolve()
 BASE_DIR = DATA_DIR
 Logger = Callable[[str], None] | None
+BACKUP_RETENTION_DAYS = 30
+_last_backup_date: str | None = None
+_backup_in_progress = False
 DATA_FILES = {
     ALERTS_FILE,
     HOLDINGS_FILE,
@@ -41,8 +47,19 @@ def describe_payload(payload: Any) -> str:
 
 
 def log(logger: Logger, message: str) -> None:
+    write_storage_log(message)
     if logger:
         logger(message)
+
+
+def write_storage_log(message: str) -> None:
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with (LOG_DIR / "storage.log").open("a", encoding="utf-8") as file:
+            file.write(f"[{stamp}] {message}\n")
+    except Exception:
+        pass
 
 
 def json_file_path(file_name: str) -> Path:
@@ -79,6 +96,43 @@ def restore_backup_file(file_name: str, logger: Logger = None) -> bool:
     return True
 
 
+def prune_old_backups(logger: Logger = None) -> None:
+    if not BACKUP_DIR.exists():
+        return
+    backup_dirs = sorted([path for path in BACKUP_DIR.iterdir() if path.is_dir()])
+    for old_dir in backup_dirs[:-BACKUP_RETENTION_DAYS]:
+        shutil.rmtree(old_dir, ignore_errors=True)
+        log(logger, f"오래된 백업 삭제: {old_dir}")
+
+
+def run_daily_backup_if_due(logger: Logger = None, *, force: bool = False) -> None:
+    global _backup_in_progress, _last_backup_date
+    if _backup_in_progress:
+        return
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not force and _last_backup_date == today:
+        return
+
+    _backup_in_progress = True
+    try:
+        target_dir = BACKUP_DIR / today
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for source_dir_name in ("data", "logs"):
+            source_dir = PROJECT_ROOT / source_dir_name
+            if not source_dir.exists():
+                continue
+            dest_dir = target_dir / source_dir_name
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            for source in source_dir.glob("*"):
+                if source.is_file():
+                    shutil.copy2(source, dest_dir / source.name)
+        prune_old_backups(logger=logger)
+        _last_backup_date = today
+        log(logger, f"일일 백업 완료: {target_dir}")
+    finally:
+        _backup_in_progress = False
+
+
 def _load_json_from_path(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as file:
         return json.load(file)
@@ -105,6 +159,13 @@ def _load_local_json_file(file_name: str, default: Any, *, required: bool = Fals
     try:
         payload = _load_json_from_path(path)
     except json.JSONDecodeError as exc:
+        if file_name in DATA_FILES and restore_backup_file(file_name, logger=logger):
+            try:
+                payload = _load_json_from_path(path)
+                log(logger, f"{file_name} JSON 깨짐 감지 후 .bak 자동 복구 성공: {path}")
+                return payload
+            except Exception as restore_exc:
+                log(logger, f"{file_name} .bak 자동 복구 후 재로드 실패: {restore_exc}")
         log(logger, f"{file_name} 로드 실패: JSON 파싱 오류 - {exc}. 경로: {path}")
         return default
 
@@ -117,6 +178,7 @@ def load_json_file(file_name: str, default: Any, *, required: bool = False, logg
 
 
 def save_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
+    run_daily_backup_if_due(logger=logger)
     path = json_file_path(file_name)
     log(logger, f"{file_name} 저장 파일 경로: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,11 +201,14 @@ def save_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
         verified_payload = _load_json_from_path(path)
         if verified_payload != payload:
             raise IOError(f"{file_name} 저장 검증 실패: 저장 후 다시 읽은 내용이 다릅니다. 경로: {path}")
-    except Exception:
+    except Exception as exc:
         if temp_path.exists():
             temp_path.unlink()
         if has_backup:
             restore_backup_file(file_name, logger=logger)
+            log(logger, f"{file_name} 저장 실패 후 rollback 완료: {exc}")
+        else:
+            log(logger, f"{file_name} 저장 실패: rollback 가능한 .bak 없음 - {exc}")
         raise
 
     log(logger, f"{file_name} 저장 성공: {describe_payload(payload)} / 경로: {path}")
@@ -172,7 +237,14 @@ def load_holdings(logger: Logger = None) -> list[dict[str, Any]]:
         try:
             payload = _load_json_from_path(path)
         except json.JSONDecodeError as exc:
-            raise IOError(f"holdings 로드 실패: JSON 파싱 오류 - {exc}. 경로: {path}") from exc
+            if restore_backup_file(HOLDINGS_FILE, logger=logger):
+                try:
+                    payload = _load_json_from_path(path)
+                    log(logger, f"{HOLDINGS_FILE} JSON 깨짐 감지 후 .bak 자동 복구 성공: {path}")
+                except Exception as restore_exc:
+                    raise IOError(f"holdings .bak 복구 후 재로드 실패: {restore_exc}. 경로: {path}") from restore_exc
+            else:
+                raise IOError(f"holdings 로드 실패: JSON 파싱 오류 - {exc}. 경로: {path}") from exc
         log(logger, f"{HOLDINGS_FILE} 로드 성공: {describe_payload(payload)} / 경로: {path}")
     else:
         payload = load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
