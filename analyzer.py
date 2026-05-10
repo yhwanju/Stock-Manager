@@ -971,6 +971,61 @@ def analyze_market() -> MarketSummary:
     )
 
 
+def extract_priority_theme_payload(news_summary: dict[str, Any], theme_config: dict[str, Any] | None = None) -> list[str]:
+    config = theme_config or storage.load_theme_config()
+    priority = priority_theme_names(config)
+    themes: list[str] = []
+
+    def add_theme(raw_theme: Any) -> None:
+        if not raw_theme:
+            return
+        canonical = canonical_theme(str(raw_theme), config)
+        if canonical in priority and canonical not in themes:
+            themes.append(canonical)
+
+    raw_themes = news_summary.get("themes", [])
+    if not isinstance(raw_themes, list):
+        raw_themes = []
+    for item in raw_themes:
+        if isinstance(item, dict):
+            add_theme(item.get("name") or item.get("theme"))
+        else:
+            add_theme(item)
+
+    raw_news = news_summary.get("key_news", [])
+    if not isinstance(raw_news, list):
+        raw_news = []
+    for item in raw_news:
+        if isinstance(item, dict):
+            item_themes = item.get("themes", [])
+            if not isinstance(item_themes, list):
+                item_themes = []
+            for theme in item_themes:
+                add_theme(theme)
+
+    return themes
+
+
+def has_news_theme_data(news_summary: dict[str, Any], theme_config: dict[str, Any] | None = None) -> bool:
+    return bool(extract_priority_theme_payload(news_summary, theme_config))
+
+
+def default_monitoring_themes(theme_config: dict[str, Any] | None = None, limit: int = 6) -> list[str]:
+    config = theme_config or storage.load_theme_config()
+    priority = priority_theme_names(config)
+    selected: list[str] = []
+    for theme in DEFAULT_THEMES:
+        canonical = canonical_theme(theme, config)
+        if canonical in priority and canonical not in selected:
+            selected.append(canonical)
+    for theme in priority:
+        if theme not in selected:
+            selected.append(theme)
+        if len(selected) >= limit:
+            break
+    return selected[:limit]
+
+
 def extract_themes_from_news(news_summary: dict[str, Any]) -> tuple[list[str], str]:
     theme_config = storage.load_theme_config()
     priority = priority_theme_names(theme_config)
@@ -1486,12 +1541,18 @@ def stock_detail_report(query: str) -> str:
 
 def strong_theme_stock_names() -> str:
     context = build_context()
-    strong_priority_themes = [
-        theme for theme in context.strong_themes
-        if is_priority_theme(theme, context.theme_config)
-    ]
+    news_based = has_news_theme_data(context.news_summary, context.theme_config)
+    strong_priority_themes = (
+        [
+            theme for theme in context.strong_themes
+            if is_priority_theme(theme, context.theme_config)
+        ]
+        if news_based
+        else default_monitoring_themes(context.theme_config)
+    )
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
+    sources: set[str] = set()
     holding_keys: set[str] = set()
     for holding in context.holdings:
         holding_keys.update(storage.item_keys(holding))
@@ -1505,6 +1566,7 @@ def strong_theme_stock_names() -> str:
         if ticker and ticker not in seen:
             candidates.append(stock)
             seen.add(ticker)
+            sources.add("관심종목 기반")
 
     for stock in theme_representatives(context.theme_config, strong_priority_themes):
         if storage.item_keys(stock) & holding_keys:
@@ -1513,6 +1575,7 @@ def strong_theme_stock_names() -> str:
         if ticker and ticker not in seen:
             candidates.append(stock)
             seen.add(ticker)
+            sources.add("대표종목 universe 기반")
 
     analyses = [analyze_stock(stock, context.strong_themes, context.market.state) for stock in candidates]
     ranked = sorted(
@@ -1520,11 +1583,35 @@ def strong_theme_stock_names() -> str:
         key=lambda item: (item.composite_score, item.timing_score, item.quant_score),
         reverse=True,
     )[:3]
-    lines = ["오늘 강한 테마 추천종목:", ""]
+    if news_based:
+        lines = ["뉴스 기반 강한테마 추천종목:", ""]
+        criteria = "뉴스 연동 기반 → 관심종목/대표종목 universe 기반"
+        sources.add("뉴스 연동 기반")
+    else:
+        lines = ["기본 감시 테마 후보종목:", ""]
+        criteria = "뉴스 연동 없음 → 관심종목/대표종목 기본 점수 기준"
+        sources.add("기본 감시 테마 기반")
     for index, item in enumerate(ranked, start=1):
         lines.append(f"{index}. {item.name}")
     if not ranked:
         lines.append("추천 가능 종목 없음")
+    if len(ranked) < 3:
+        lines.append("")
+        lines.append("후보군이 부족합니다. 관심종목 또는 theme_universe 대표종목을 추가해주세요.")
+    lines.append("")
+    lines.append("기준:")
+    lines.append(bold(criteria))
+    lines.append("")
+    lines.append("데이터 출처:")
+    ordered_sources = [
+        "뉴스 연동 기반",
+        "기본 감시 테마 기반",
+        "관심종목 기반",
+        "대표종목 universe 기반",
+    ]
+    for source in ordered_sources:
+        if source in sources:
+            lines.append(f"* {bold(source)}")
     return "\n".join(lines)
 
 
@@ -1778,12 +1865,32 @@ def today_strategy_report() -> str:
 
 def strong_themes_report() -> str:
     news = storage.load_news_summary()
-    themes, note = extract_themes_from_news(news)
-    lines = section("🔥 강한테마")
-    for index, theme in enumerate(themes[:3], start=1):
-        lines.append(f"{index}. {bold(theme)}")
+    theme_config = storage.load_theme_config()
+    if has_news_theme_data(news, theme_config):
+        themes, note = extract_themes_from_news(news)
+        lines = section("🔥 테마 분석")
+        lines.append(f"상태: {bold('뉴스 연동 기반')}")
+        lines.append("")
+        lines.append("강한테마:")
+        for index, theme in enumerate(themes[:3], start=1):
+            lines.append(f"{index}. {bold(theme)}")
+        lines.append("")
+        lines.append(f"기준: {bold(note)}")
+        lines.append(f"데이터 출처: {bold('뉴스 연동 기반')}")
+        return "\n".join(lines).strip()
+
+    themes = default_monitoring_themes(theme_config)
+    lines = section("🔥 테마 분석")
+    lines.append(f"상태: {bold('뉴스 연동 데이터 없음')}")
     lines.append("")
-    lines.append(f"기준: {note}")
+    lines.append("기본 감시 테마:")
+    for theme in themes:
+        lines.append(f"* {theme}")
+    lines.append("")
+    lines.append("주의:")
+    lines.append("현재 결과는 실시간 강한테마가 아니라 기본 감시 테마 기준입니다.")
+    lines.append("")
+    lines.append(f"데이터 출처: {bold('기본 감시 테마 기반')}")
     return "\n".join(lines).strip()
 
 
