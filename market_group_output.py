@@ -4,7 +4,10 @@ from typing import Any
 
 import analyzer
 import storage
+import theme_universe
 
+
+theme_universe.patch_analyzer_theme_universe()
 
 Logger = analyzer.Logger
 
