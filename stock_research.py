@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import analyzer
@@ -13,7 +14,7 @@ def _safe_number(value: Any) -> float | None:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    if not analyzer.math.isfinite(number):
+    if not math.isfinite(number):
         return None
     return number
 
@@ -26,7 +27,7 @@ def _info_number(info: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
-def _short_text(value: Any, limit: int = 90) -> str:
+def _short_text(value: Any, limit: int = 110) -> str:
     text = str(value or "").replace("\n", " ").strip()
     if not text:
         return DATA_MISSING
@@ -73,7 +74,6 @@ def _load_profile(ticker: str) -> dict[str, Any]:
         "quarterly_financials": None,
         "cashflow": None,
         "balance_sheet": None,
-        "news": [],
     }
     try:
         yf_ticker = analyzer.yf.Ticker(ticker)
@@ -95,23 +95,6 @@ def _load_profile(ticker: str) -> dict[str, Any]:
             profile[key] = getattr(yf_ticker, attr)
         except Exception:
             profile[key] = None
-
-    try:
-        raw_news = getattr(yf_ticker, "news", []) or []
-        titles: list[str] = []
-        for item in raw_news[:3]:
-            content = item.get("content", item) if isinstance(item, dict) else {}
-            title = ""
-            if isinstance(content, dict):
-                title = str(content.get("title") or content.get("summary") or "")
-            if not title and isinstance(item, dict):
-                title = str(item.get("title") or item.get("summary") or "")
-            if title:
-                titles.append(_short_text(title, 100))
-        profile["news"] = titles
-    except Exception:
-        profile["news"] = []
-
     return profile
 
 
@@ -236,27 +219,10 @@ def _moat_text(financial: dict[str, Any]) -> str:
     strong_roe = roe is not None and (roe >= 0.15 if abs(roe) <= 2 else roe >= 15)
     positive_fcf = fcf is not None and fcf > 0
     if strong_margin and strong_roe and positive_fcf:
-        return "정량 지표상 우위 가능, 정성 검증 필요"
+        return "정량 지표상 우위 가능, 지속성 확인 필요"
     if positive_fcf and (strong_margin or strong_roe):
-        return "일부 우위 가능, 지속성 확인 필요"
+        return "일부 우위 가능, 추가 검증 필요"
     return "정량상 강한 해자 확인 부족"
-
-
-def _market_valuation_view(valuation: dict[str, Any], financial: dict[str, Any]) -> str:
-    per = valuation.get("per")
-    growth = financial.get("revenue_growth") or financial.get("eps_growth")
-    roe = financial.get("roe")
-    if per is None or growth is None:
-        return DATA_MISSING
-    normalized_growth = growth * 100 if abs(growth) <= 2 else growth
-    normalized_roe = roe * 100 if roe is not None and abs(roe) <= 2 else roe
-    if per <= 15 and normalized_growth > 10:
-        return "성장 대비 과소평가 가능"
-    if per >= 35 and normalized_growth < 15:
-        return "성장 대비 과대평가 가능"
-    if normalized_roe is not None and normalized_roe >= 15 and per <= 25:
-        return "품질 대비 중립~저평가 가능"
-    return "중립 또는 판단 보류"
 
 
 def _final_decision(analysis: analyzer.StockAnalysis, valuation: dict[str, Any]) -> str:
@@ -281,151 +247,20 @@ def _targets_text(analysis: analyzer.StockAnalysis) -> str:
     return f"1차 {values[0]} / 2차 {values[1]} / 최종 {values[2]}"
 
 
-def _news_lines(analysis: analyzer.StockAnalysis, context: analyzer.AnalysisContext, profile: dict[str, Any]) -> list[str]:
-    news = list(profile.get("news") or [])
-    if news:
-        return news[:2]
-    try:
-        related = analyzer.related_news_lines(analysis, context)
-    except Exception:
-        related = []
-    return [line for line in related if line and line != "-"][:2] or [DATA_MISSING]
-
-
-def _append_company_core(lines: list[str], profile: dict[str, Any], financial: dict[str, Any]) -> None:
-    info = profile["info"]
-    summary = _short_text(info.get("longBusinessSummary"), 110)
-    revenue_source = "사업 설명 기준, 세그먼트 매출 데이터 부족" if summary != DATA_MISSING else DATA_MISSING
-    growth = financial.get("revenue_growth") or financial.get("eps_growth")
-    growth_text = f"매출/EPS 성장률 {_format_pct(growth)}" if growth is not None else DATA_MISSING
-    lines.extend(analyzer.section("🏢 기업 핵심"))
-    lines.append(f"주요 사업: {_bold_or_missing(summary)}")
-    lines.append(f"실제 수익원: {_bold_or_missing(revenue_source)}")
-    lines.append(f"성장 동력: {_bold_or_missing(growth_text)}")
-    lines.append("")
-
-
-def _append_industry_position(lines: list[str], profile: dict[str, Any], financial: dict[str, Any]) -> None:
-    info = profile["info"]
-    sector = str(info.get("sector") or "").strip()
-    industry = str(info.get("industry") or "").strip()
-    industry_text = " / ".join(part for part in (sector, industry) if part) or DATA_MISSING
-    cycle_text = f"{industry_text}, 사이클 데이터 부족" if industry_text != DATA_MISSING else DATA_MISSING
-    lines.extend(analyzer.section("🏭 산업/경쟁 위치"))
-    lines.append(f"산업 사이클: {_bold_or_missing(cycle_text)}")
-    lines.append(f"주요 경쟁사/진입장벽: {_bold_or_missing(DATA_MISSING)}")
-    lines.append(f"Moat 평가: {_bold_or_missing(_moat_text(financial))}")
-    lines.append("")
-
-
-def _append_financial_check(lines: list[str], financial: dict[str, Any]) -> None:
-    currency = financial.get("currency", "")
-    cash = financial.get("cash")
-    debt = financial.get("debt")
-    debt_cash = DATA_MISSING
-    if cash is not None or debt is not None:
-        debt_cash = f"현금 {_format_money(cash, currency)} / 부채 {_format_money(debt, currency)}"
-    lines.extend(analyzer.section("💵 재무 체크"))
-    lines.append(
-        "성장/마진: "
-        + analyzer.bold(
-            f"매출 {_format_pct(financial.get('revenue_growth'))}, "
-            f"OPM {_format_pct(financial.get('operating_margin'))}, "
-            f"NPM {_format_pct(financial.get('net_margin'))}, EPS {_format_pct(financial.get('eps_growth'))}"
-        )
-    )
-    lines.append(
-        "현금흐름/재무상태: "
-        + analyzer.bold(f"FCF {_format_money(financial.get('fcf'), currency)}, {debt_cash}")
-    )
-    lines.append(
-        "수익성/질: "
-        + analyzer.bold(
-            f"ROE {_format_pct(financial.get('roe'))}, ROIC {_format_pct(financial.get('roic'))}, "
-            f"{_quality_text(financial)}"
-        )
-    )
-    lines.append("")
-
-
-def _append_valuation(lines: list[str], valuation: dict[str, Any]) -> None:
-    lines.extend(analyzer.section("⚖️ 밸류에이션"))
-    lines.append(
-        "멀티플: "
-        + analyzer.bold(
-            f"PER {_format_ratio(valuation.get('per'))}, "
-            f"PBR {_format_ratio(valuation.get('pbr'))}, "
-            f"PSR {_format_ratio(valuation.get('psr'))}, "
-            f"EV/EBITDA {_format_ratio(valuation.get('ev_ebitda'))}"
-        )
-    )
-    lines.append(f"업종/과거 평균 대비: {analyzer.bold(DATA_MISSING)}")
-    lines.append(f"성장률 대비: {analyzer.bold(valuation.get('burden') or DATA_MISSING)}")
-    lines.append(f"좋은 기업 vs 좋은 주식: {analyzer.bold('좋은 기업이어도 가격이 비싸면 기대수익률은 낮아질 수 있음')}")
-    lines.append("")
-
-
-def _append_recent_results_news(
-    lines: list[str],
-    analysis: analyzer.StockAnalysis,
-    context: analyzer.AnalysisContext,
-    profile: dict[str, Any],
-    financial: dict[str, Any],
-) -> None:
-    currency = financial.get("currency", "")
-    quarter = (
-        f"매출 {_format_money(financial.get('latest_quarter_revenue'), currency)}, "
-        f"OPM {_format_pct(financial.get('latest_quarter_op_margin'))}, "
-        f"NPM {_format_pct(financial.get('latest_quarter_net_margin'))}"
-    )
-    news = " / ".join(_news_lines(analysis, context, profile))
-    lines.extend(analyzer.section("📰 최근 실적/뉴스"))
-    lines.append(f"최근 분기: {analyzer.bold(quarter)}")
-    lines.append(f"서프라이즈/가이던스: {analyzer.bold(DATA_MISSING)}")
-    lines.append(f"핵심 뉴스: {analyzer.bold(news)}")
-    lines.append("")
-
-
-def _append_catalysts_risks(
-    lines: list[str],
-    analysis: analyzer.StockAnalysis,
-    financial: dict[str, Any],
-    valuation: dict[str, Any],
-) -> None:
-    catalysts: list[str] = []
-    if analysis.themes:
-        catalysts.append(f"테마 수급: {', '.join(analysis.themes[:2])}")
-    if financial.get("revenue_growth") is not None and financial["revenue_growth"] > 0:
-        catalysts.append(f"매출 성장 {_format_pct(financial['revenue_growth'])}")
-    if analysis.timing_score >= 70:
-        catalysts.append("기술적 타이밍 양호")
-    risks = list(analysis.risk_bullets[:2])
-    if "부담 높음" in str(valuation.get("burden")):
-        risks.append("성장 대비 밸류 부담")
-    if financial.get("debt") and financial.get("cash") and financial["debt"] > financial["cash"]:
-        risks.append("부채가 현금보다 큼")
-
-    lines.extend(analyzer.section("🚦 촉매와 리스크"))
-    lines.append(f"상승 촉매: {_bold_or_missing(' / '.join(catalysts[:3]) or DATA_MISSING)}")
-    lines.append(f"하락 리스크: {_bold_or_missing(' / '.join(risks[:3]) or DATA_MISSING)}")
-    lines.append(f"시장 평가: {_bold_or_missing(_market_valuation_view(valuation, financial))}")
-    lines.append("")
-
-
-def _append_self_rebuttal(lines: list[str], analysis: analyzer.StockAnalysis, financial: dict[str, Any]) -> None:
-    rebuttals = [
-        "재무/뉴스 데이터가 부족하면 정성 판단이 빗나갈 수 있음",
-        "진입구간 터치 전 목표가를 먼저 가면 추격매수 위험이 커짐",
-    ]
-    if financial.get("revenue_growth") is not None and financial["revenue_growth"] < 0:
-        rebuttals.append("매출 둔화가 일시적이 아니라 구조적일 수 있음")
-    elif analysis.timing_score >= 70:
-        rebuttals.append("단기 과열 후 평균회귀가 먼저 나올 수 있음")
-    else:
-        rebuttals.append("기술적 약세가 예상보다 오래 지속될 수 있음")
-    lines.extend(analyzer.section("🧭 자기반박"))
-    for item in rebuttals[:3]:
-        lines.append(f"* {item}")
+def _append_quick_header(lines: list[str], analysis: analyzer.StockAnalysis) -> None:
+    rsi = _safe_number(analysis.metrics.get("rsi"))
+    volume_ratio = _safe_number(analysis.metrics.get("volume_ratio"))
+    rsi_text = f"{rsi:.1f}" if rsi is not None else DATA_MISSING
+    volume_text = f"{volume_ratio:.1f}배" if volume_ratio is not None else DATA_MISSING
+    lines.extend(analyzer.section("🔎 종목분석"))
+    lines.append(f"종목명: {analyzer.bold(analysis.name)}")
+    lines.append(f"티커: {analyzer.bold(analysis.ticker)}")
+    lines.append(f"현재가: {analyzer.bold(analyzer.format_price_for_ticker(analysis.current_price, analysis.ticker))}")
+    lines.append(f"등락률: {analyzer.bold(analyzer.format_pct(analysis.change_pct))}")
+    lines.append(f"RSI: {analyzer.bold(rsi_text)}")
+    lines.append(f"거래량 변화: {analyzer.bold(volume_text)}")
+    lines.append(f"퀀트/타이밍: {analyzer.bold(f'{analysis.quant_score} / {analysis.timing_score}')}")
+    lines.append(f"관련 테마: {analyzer.bold(', '.join(analysis.themes) if analysis.themes else '-')}")
     lines.append("")
 
 
@@ -448,41 +283,121 @@ def _append_final_judgment(lines: list[str], analysis: analyzer.StockAnalysis, v
     lines.append(f"확신도: {analyzer.bold(f'{confidence} / 100')}")
 
 
+def _append_company_core(lines: list[str], profile: dict[str, Any], financial: dict[str, Any]) -> None:
+    info = profile["info"]
+    summary = _short_text(info.get("longBusinessSummary"), 110)
+    growth = financial.get("revenue_growth") or financial.get("eps_growth")
+    growth_text = f"매출/EPS 성장률 {_format_pct(growth)}" if growth is not None else DATA_MISSING
+    lines.extend(analyzer.section("🏢 기업 핵심"))
+    lines.append(f"주요 사업: {_bold_or_missing(summary)}")
+    lines.append(f"성장 동력: {_bold_or_missing(growth_text)}")
+    lines.append("")
+
+
+def _append_financial_check(lines: list[str], financial: dict[str, Any]) -> None:
+    currency = financial.get("currency", "")
+    cash = financial.get("cash")
+    debt = financial.get("debt")
+    debt_cash = DATA_MISSING
+    if cash is not None or debt is not None:
+        debt_cash = f"현금 {_format_money(cash, currency)} / 부채 {_format_money(debt, currency)}"
+    lines.extend(analyzer.section("💵 재무 체크"))
+    lines.append(
+        "성장/마진: "
+        + analyzer.bold(
+            f"매출 {_format_pct(financial.get('revenue_growth'))}, "
+            f"OPM {_format_pct(financial.get('operating_margin'))}, "
+            f"NPM {_format_pct(financial.get('net_margin'))}, EPS {_format_pct(financial.get('eps_growth'))}"
+        )
+    )
+    lines.append("현금흐름/재무상태: " + analyzer.bold(f"FCF {_format_money(financial.get('fcf'), currency)}, {debt_cash}"))
+    lines.append(
+        "수익성/질: "
+        + analyzer.bold(
+            f"ROE {_format_pct(financial.get('roe'))}, ROIC {_format_pct(financial.get('roic'))}, "
+            f"{_quality_text(financial)}"
+        )
+    )
+    lines.append(f"Moat 평가: {analyzer.bold(_moat_text(financial))}")
+    lines.append("")
+
+
+def _append_valuation(lines: list[str], valuation: dict[str, Any]) -> None:
+    lines.extend(analyzer.section("⚖️ 밸류에이션"))
+    lines.append(
+        "멀티플: "
+        + analyzer.bold(
+            f"PER {_format_ratio(valuation.get('per'))}, "
+            f"PBR {_format_ratio(valuation.get('pbr'))}, "
+            f"PSR {_format_ratio(valuation.get('psr'))}, "
+            f"EV/EBITDA {_format_ratio(valuation.get('ev_ebitda'))}"
+        )
+    )
+    lines.append(f"성장률 대비: {analyzer.bold(valuation.get('burden') or DATA_MISSING)}")
+    lines.append(f"가격 관점: {analyzer.bold('기업은 좋아도 현재 주가 부담이 크면 기대수익률은 제한될 수 있음')}")
+    lines.append("")
+
+
+def _append_recent_results(lines: list[str], financial: dict[str, Any]) -> None:
+    currency = financial.get("currency", "")
+    quarter = (
+        f"매출 {_format_money(financial.get('latest_quarter_revenue'), currency)}, "
+        f"OPM {_format_pct(financial.get('latest_quarter_op_margin'))}, "
+        f"NPM {_format_pct(financial.get('latest_quarter_net_margin'))}"
+    )
+    lines.extend(analyzer.section("📊 최근 실적"))
+    lines.append(f"최근 분기: {analyzer.bold(quarter)}")
+    lines.append(f"가이던스: {analyzer.bold(DATA_MISSING)}")
+    lines.append("")
+
+
+def _append_self_rebuttal(lines: list[str], analysis: analyzer.StockAnalysis, financial: dict[str, Any]) -> None:
+    rebuttals = [
+        "재무 데이터가 부족하면 기업 체력 판단이 보수적일 수 있음",
+        "눌림 없이 급등하면 추격매수 리스크 커질 수 있음",
+    ]
+    if financial.get("revenue_growth") is not None and financial["revenue_growth"] < 0:
+        rebuttals.append("매출 둔화가 일시적이 아니라 구조적일 가능성 있음")
+    elif analysis.timing_score >= 70:
+        rebuttals.append("단기 과열 후 조정이 먼저 나올 수 있음")
+    else:
+        rebuttals.append("생각보다 조정 기간이 길어질 가능성 있음")
+    lines.extend(analyzer.section("🧭 자기반박"))
+    for item in rebuttals[:3]:
+        lines.append(f"* {item}")
+    lines.append("")
+
+
 def stock_detail_report(query: str) -> str:
-    analysis, context = analyzer.analyze_query_stock(query)
+    analysis, _ = analyzer.analyze_query_stock(query)
+    if analysis.error:
+        return analyzer.stock_detail_report(query)
+
+    lines: list[str] = []
+    _append_quick_header(lines, analysis)
+    _append_technical_theme_basis(lines, analysis)
+    _append_final_judgment(lines, analysis, {})
+    return "\n".join(lines).strip()
+
+
+def stock_deep_detail_report(query: str) -> str:
+    analysis, _ = analyzer.analyze_query_stock(query)
     if analysis.error:
         return analyzer.stock_detail_report(query)
 
     profile = _load_profile(analysis.ticker)
     financial = _financial_snapshot(profile)
     valuation = _valuation_snapshot(profile, financial)
-    rsi = _safe_number(analysis.metrics.get("rsi"))
-    volume_ratio = _safe_number(analysis.metrics.get("volume_ratio"))
-    rsi_text = f"{rsi:.1f}" if rsi is not None else DATA_MISSING
-    volume_text = f"{volume_ratio:.1f}배" if volume_ratio is not None else DATA_MISSING
 
     lines: list[str] = []
-    lines.extend(analyzer.section("🔎 종목분석"))
+    lines.extend(analyzer.section("🔬 종목세부분석"))
     lines.append(f"종목명: {analyzer.bold(analysis.name)}")
     lines.append(f"티커: {analyzer.bold(analysis.ticker)}")
     lines.append(f"현재가: {analyzer.bold(analyzer.format_price_for_ticker(analysis.current_price, analysis.ticker))}")
-    lines.append(f"등락률: {analyzer.bold(analyzer.format_pct(analysis.change_pct))}")
-    lines.append(f"20일선 위치: {analyzer.bold(analyzer.format_pct(analysis.metrics.get('price_vs_ma20')))}")
-    lines.append(f"60일선: {analyzer.bold(analyzer.format_price_for_ticker(analysis.metrics.get('ma60'), analysis.ticker))}")
-    lines.append(f"RSI: {analyzer.bold(rsi_text)}")
-    lines.append(f"거래량 변화: {analyzer.bold(volume_text)}")
-    lines.append(f"퀀트 점수: {analyzer.bold(analysis.quant_score)}")
-    lines.append(f"매매 타이밍 점수: {analyzer.bold(analysis.timing_score)}")
-    lines.append(f"관련 테마: {analyzer.bold(', '.join(analysis.themes) if analysis.themes else '-')}")
     lines.append("")
-
-    _append_technical_theme_basis(lines, analysis)
     _append_company_core(lines, profile, financial)
-    _append_industry_position(lines, profile, financial)
     _append_financial_check(lines, financial)
     _append_valuation(lines, valuation)
-    _append_recent_results_news(lines, analysis, context, profile, financial)
-    _append_catalysts_risks(lines, analysis, financial, valuation)
+    _append_recent_results(lines, financial)
     _append_self_rebuttal(lines, analysis, financial)
-    _append_final_judgment(lines, analysis, valuation)
     return "\n".join(lines).strip()
