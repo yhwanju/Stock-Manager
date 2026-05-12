@@ -10,6 +10,7 @@ import discord
 from discord import app_commands
 
 import bot_commands
+import market_group_output
 import storage
 from config import BOT_TOKEN_ENV_NAME, DISCORD_CONTENT_LIMIT, KST
 
@@ -166,7 +167,7 @@ async def delete_watchlist_command(interaction: discord.Interaction, 종목명: 
 
 @client.tree.command(name="관심목록", description="현재 관심종목 목록을 보여줍니다.")
 async def list_watchlist_command(interaction: discord.Interaction) -> None:
-    await respond(interaction, bot_commands.list_watchlist)
+    await respond(interaction, market_group_output.watchlist_text)
 
 
 @client.tree.command(name="종목매핑확인", description="종목명 자동검색 결과를 확인합니다.")
@@ -224,7 +225,7 @@ async def delete_holding_command(interaction: discord.Interaction, 종목명: st
 
 @client.tree.command(name="보유목록", description="현재 보유종목 목록을 보여줍니다.")
 async def list_holdings_command(interaction: discord.Interaction) -> None:
-    await respond(interaction, bot_commands.list_holdings)
+    await respond(interaction, market_group_output.holdings_text)
 
 
 @client.tree.command(name="매매이력", description="최근 매매이력을 보여줍니다.")
