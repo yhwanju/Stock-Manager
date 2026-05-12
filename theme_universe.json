@@ -1,0 +1,10 @@
+{
+  "AI": ["NVDA", "AVGO", "PLTR", "SMCI", "MSFT", "GOOGL"],
+  "반도체": ["NVDA", "AVGO", "AMD", "TSM", "ASML", "MU", "SMCI"],
+  "광통신": ["AAOI", "LITE", "COHR", "CIEN"],
+  "전력": ["VRT", "ETN", "GEV", "PWR", "HUBB"],
+  "원전": ["SMR", "OKLO", "CEG", "BWXT", "CCJ"],
+  "ESS": ["TSLA", "FLNC", "ENPH", "SEDG", "STEM"],
+  "방산": ["LMT", "RTX", "NOC", "GD", "HII"],
+  "우주항공": ["RKLB", "LUNR", "ASTS", "BA", "LMT"]
+}
