@@ -138,10 +138,16 @@ async def help_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.help_text)
 
 
-@client.tree.command(name="종목분석", description="입력한 종목명 또는 티커를 상세 분석합니다.")
+@client.tree.command(name="종목분석", description="입력한 종목명 또는 티커를 빠르게 분석합니다.")
 @app_commands.describe(종목명="종목명 또는 티커")
 async def stock_analysis_command(interaction: discord.Interaction, 종목명: str) -> None:
     await respond(interaction, stock_research.stock_detail_report, 종목명)
+
+
+@client.tree.command(name="종목세부분석", description="기업, 재무, 밸류에이션 중심의 상세 리서치를 보여줍니다.")
+@app_commands.describe(종목명="종목명 또는 티커")
+async def stock_deep_analysis_command(interaction: discord.Interaction, 종목명: str) -> None:
+    await respond(interaction, stock_research.stock_deep_detail_report, 종목명)
 
 
 @client.tree.command(name="강한테마종목", description="오늘 강한 테마 기준 추천종목 3개 이름만 보여줍니다.")
