@@ -257,6 +257,11 @@ async def analysis_performance_command(interaction: discord.Interaction) -> None
     await respond(interaction, recommendation_state.analysis_performance)
 
 
+@client.tree.command(name="추천이력테스트추가", description="성과추적 테스트용 추천이력 1건을 저장합니다.")
+async def add_test_recommendation_history_command(interaction: discord.Interaction) -> None:
+    await respond(interaction, recommendation_state.add_test_recommendation_history)
+
+
 @client.tree.command(name="포트폴리오점검", description="보유종목 비중, 테마 편중, 리스크를 점검합니다.")
 async def portfolio_check_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.portfolio_check)
@@ -283,7 +288,7 @@ async def strong_themes_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.strong_themes)
 
 
-@client.tree.command(name="물림", description="손절가, 버팀 구간, 시간손절 기준을 분석합니다.")
+@client.tree.command(name="물림", description="손절가, 버틸 구간, 시간손절 기준을 분석합니다.")
 @app_commands.describe(종목명="종목명 또는 티커", 평단="평균 단가")
 async def stuck_command(interaction: discord.Interaction, 종목명: str, 평단: float) -> None:
     await respond(interaction, bot_commands.stuck, 종목명, 평단)
