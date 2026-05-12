@@ -10,6 +10,7 @@ from analyzer import build_daily_reports
 from config import DISCORD_CONTENT_LIMIT, KST, WEBHOOK_ENV_NAME
 import recommendation_state
 import storage
+import theme_universe
 
 
 SCHEDULE_REPORT_START_KST = time(7, 40)
@@ -143,6 +144,7 @@ def main() -> int:
         log(f"Discord 발송 실패: {WEBHOOK_ENV_NAME} 환경 변수가 설정되어 있지 않습니다.")
         raise RuntimeError(f"{WEBHOOK_ENV_NAME} 환경 변수가 설정되어 있지 않습니다.")
 
+    theme_universe.patch_analyzer_theme_universe()
     recommendation_state.patch_analyzer_history_recorder()
     reports = build_daily_reports(logger=log, record_recommendations=not dry_run)
 
