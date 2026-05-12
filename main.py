@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import argparse
 import os
-from datetime import datetime
+from datetime import datetime, time, timezone
 
 import requests
 
 from analyzer import build_daily_reports
 from config import DISCORD_CONTENT_LIMIT, KST, WEBHOOK_ENV_NAME
 import storage
+
+
+SCHEDULE_REPORT_START_KST = time(7, 40)
+SCHEDULE_REPORT_END_KST = time(8, 10)
 
 
 def log(message: str) -> None:
@@ -90,18 +94,39 @@ def should_skip_for_weekend(now: datetime, event_name: str, force_weekend: bool)
     return event_name == "schedule" and is_weekend_kst(now)
 
 
+def is_schedule_report_time_allowed(now: datetime) -> bool:
+    current_time = now.time()
+    return SCHEDULE_REPORT_START_KST <= current_time <= SCHEDULE_REPORT_END_KST
+
+
+def should_skip_for_schedule_time(now: datetime, event_name: str) -> bool:
+    return event_name == "schedule" and not is_schedule_report_time_allowed(now)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="데일리 주식관리 리포트 생성 및 Discord 발송")
     parser.add_argument("--dry-run", action="store_true", help="Discord 전송 없이 리포트만 출력합니다.")
     parser.add_argument("--force-weekend", action="store_true", help="주말에도 강제로 실행합니다.")
     args = parser.parse_args()
 
-    now = datetime.now(KST)
+    utc_now = datetime.now(timezone.utc)
+    now = utc_now.astimezone(KST)
     dry_run = args.dry_run or os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes"}
     event_name = os.getenv("GITHUB_EVENT_NAME", "local")
+    schedule_time_allowed = is_schedule_report_time_allowed(now)
+    time_guard_status = "통과" if schedule_time_allowed else "실패"
+    if event_name != "schedule":
+        time_guard_status = "미적용"
 
-    log(f"실행 이벤트: {event_name}")
-    log(f"현재 시각: {now:%Y-%m-%d %H:%M:%S} KST")
+    log(f"현재 UTC 시간: {utc_now:%Y-%m-%d %H:%M:%S} UTC")
+    log(f"현재 KST 시간: {now:%Y-%m-%d %H:%M:%S} KST")
+    log(f"event name: {event_name}")
+    log(f"시간 가드 통과 여부: {time_guard_status}")
+
+    if should_skip_for_schedule_time(now, event_name):
+        log("schedule 실행 시간이 허용 범위가 아니므로 리포트 발송을 생략합니다.")
+        return 0
+
     storage.run_daily_backup_if_due(logger=log)
 
     if should_skip_for_weekend(now, event_name, args.force_weekend):
