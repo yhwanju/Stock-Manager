@@ -15,6 +15,7 @@ MARKET_GROUP_LABELS = {
     "NASDAQ": "🟩 **NASDAQ**",
     "기타": "**기타**",
 }
+THEME_REFRESH_TARGETS = {"AAOI", "COHR"}
 
 
 def display_ticker_code(ticker: str | None) -> str:
@@ -57,8 +58,57 @@ def append_market_group_header(lines: list[str], market: str) -> None:
     lines.append("━━━━━━━━━━")
 
 
+def theme_values_are_unclassified(value: Any) -> bool:
+    if value is None:
+        return True
+    values = value if isinstance(value, list) else [value]
+    labels = [str(item).strip() for item in values if str(item).strip()]
+    return not labels or all(storage.normalize(label) == storage.normalize("미분류") for label in labels)
+
+
+def theme_payload_values(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def refresh_watchlist_target_themes() -> int:
+    items = storage.load_watchlist()
+    if not items:
+        return 0
+
+    theme_map = storage.load_theme_map()
+    updated = 0
+    for item in items:
+        ticker = str(item.get("ticker", "")).strip().upper()
+        name = str(item.get("name", "")).strip().upper()
+        target = ticker if ticker in THEME_REFRESH_TARGETS else name if name in THEME_REFRESH_TARGETS else ""
+        if not target or not theme_values_are_unclassified(item.get("themes")):
+            continue
+
+        payload = theme_map.get(target)
+        if not isinstance(payload, dict):
+            continue
+
+        themes = theme_payload_values(payload.get("themes"))
+        if not themes:
+            continue
+
+        item["themes"] = themes
+        subthemes = theme_payload_values(payload.get("subthemes"))
+        if subthemes:
+            item["subthemes"] = subthemes
+        updated += 1
+
+    if updated:
+        storage.save_watchlist(items)
+    return updated
+
+
 def watchlist_text() -> str:
     storage.prune_watchlist_holdings_overlap()
+    refresh_watchlist_target_themes()
     items = storage.load_watchlist()
     theme_config = storage.load_theme_config()
     lines = analyzer.section("⭐ 관심종목 목록")
