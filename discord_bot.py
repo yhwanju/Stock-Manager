@@ -11,6 +11,7 @@ from discord import app_commands
 
 import bot_commands
 import market_group_output
+import recommendation_state
 import storage
 from config import BOT_TOKEN_ENV_NAME, DISCORD_CONTENT_LIMIT, KST
 
@@ -236,12 +237,17 @@ async def trade_history_command(interaction: discord.Interaction, 종목명: str
 
 @client.tree.command(name="성과추적", description="정기 리포트 추천종목의 최근 성과를 보여줍니다.")
 async def recommendation_performance_command(interaction: discord.Interaction) -> None:
-    await respond(interaction, bot_commands.recommendation_performance)
+    await respond(interaction, recommendation_state.recommendation_performance)
 
 
 @client.tree.command(name="알고리즘성과", description="추천 알고리즘의 전체 성과를 요약합니다.")
 async def algorithm_performance_command(interaction: discord.Interaction) -> None:
-    await respond(interaction, bot_commands.algorithm_performance)
+    await respond(interaction, recommendation_state.algorithm_performance)
+
+
+@client.tree.command(name="분석성과", description="추천 상태머신 기준 성과를 요약합니다.")
+async def analysis_performance_command(interaction: discord.Interaction) -> None:
+    await respond(interaction, recommendation_state.analysis_performance)
 
 
 @client.tree.command(name="포트폴리오점검", description="보유종목 비중, 테마 편중, 리스크를 점검합니다.")
@@ -270,7 +276,7 @@ async def strong_themes_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.strong_themes)
 
 
-@client.tree.command(name="물림", description="손절가, 버틸 구간, 시간손절 기준을 분석합니다.")
+@client.tree.command(name="물림", description="손절가, 버팀 구간, 시간손절 기준을 분석합니다.")
 @app_commands.describe(종목명="종목명 또는 티커", 평단="평균 단가")
 async def stuck_command(interaction: discord.Interaction, 종목명: str, 평단: float) -> None:
     await respond(interaction, bot_commands.stuck, 종목명, 평단)
