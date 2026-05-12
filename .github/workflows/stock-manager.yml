@@ -2,8 +2,8 @@ name: Stock Manager
 
 on:
   schedule:
-    # KST Monday-Friday 07:50 = UTC Sunday-Thursday 22:50
-    - cron: "50 22 * * 0-4"
+  # KST Monday-Friday 09:00 = UTC Monday-Friday 00:00
+- cron: "0 0 * * 1-5"
   workflow_dispatch:
 
 permissions:
