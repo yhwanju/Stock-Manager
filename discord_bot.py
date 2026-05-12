@@ -12,6 +12,7 @@ from discord import app_commands
 import bot_commands
 import market_group_output
 import recommendation_state
+import stock_research
 import storage
 from config import BOT_TOKEN_ENV_NAME, DISCORD_CONTENT_LIMIT, KST
 
@@ -140,7 +141,7 @@ async def help_command(interaction: discord.Interaction) -> None:
 @client.tree.command(name="종목분석", description="입력한 종목명 또는 티커를 상세 분석합니다.")
 @app_commands.describe(종목명="종목명 또는 티커")
 async def stock_analysis_command(interaction: discord.Interaction, 종목명: str) -> None:
-    await respond(interaction, bot_commands.stock_analysis, 종목명)
+    await respond(interaction, stock_research.stock_detail_report, 종목명)
 
 
 @client.tree.command(name="강한테마종목", description="오늘 강한 테마 기준 추천종목 3개 이름만 보여줍니다.")
