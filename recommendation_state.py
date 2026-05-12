@@ -84,7 +84,7 @@ def _history_from_recommendation(ticker: str, recommendation_dt: datetime | None
         filtered = history.loc[mask]
     except Exception:
         filtered = history
-    return (filtered if not filtered.empty else history), None
+    return filtered, None
 
 
 def _history_latest_close(history) -> float | None:
@@ -457,6 +457,79 @@ def algorithm_performance(logger: Logger = None) -> str:
 def analysis_performance(logger: Logger = None) -> str:
     report = algorithm_performance(logger=logger)
     return report.replace("**📊 알고리즘성과**", "**📊 분석성과**", 1)
+
+
+def add_test_recommendation_history(logger: Logger = None) -> str:
+    now = datetime.now(KST)
+    ticker = "NVDA"
+    name = "엔비디아"
+    themes = ["AI", "반도체"]
+    analysis = analyzer.analyze_stock(
+        {"name": name, "ticker": ticker, "themes": themes},
+        [],
+        "횡보장",
+    )
+    current_price = _safe_float(analysis.current_price) or 100.0
+    entry_low = round(current_price * 0.90, 2)
+    entry_high = round(current_price * 0.92, 2)
+    entry_reference_price = round((entry_low + entry_high) / 2, 2)
+    target_1 = round(entry_reference_price * 1.08, 2)
+    target_2 = round(entry_reference_price * 1.15, 2)
+    target_final = round(entry_reference_price * 1.25, 2)
+    stop_price = round(entry_reference_price * 0.92, 2)
+    history = storage.load_recommendation_history(logger=logger)
+    item = {
+        "recommendation_id": f"test-{now:%Y%m%d%H%M%S}-{ticker}",
+        "date": f"{now:%Y-%m-%d %H:%M:%S} KST",
+        "name": name,
+        "ticker": ticker,
+        "price": current_price,
+        "entry_low": entry_low,
+        "entry_high": entry_high,
+        "entry_reference_price": entry_reference_price,
+        "entry_zone": (
+            f"{analyzer.format_price_for_ticker(entry_low, ticker)} ~ "
+            f"{analyzer.format_price_for_ticker(entry_high, ticker)}"
+        ),
+        "action": "테스트",
+        "quant_score": 75,
+        "timing_score": 70,
+        "market_state": "횡보장",
+        "theme_strength": 80,
+        "confidence_score": 73,
+        "predicted_best_target": "1차 목표가",
+        "actual_best_target": "",
+        "target_1": target_1,
+        "target_2": target_2,
+        "target_final": target_final,
+        "target_price": target_1,
+        "stop_price": stop_price,
+        "entry_triggered": False,
+        "entry_triggered_at": "",
+        "hit_target_1": False,
+        "hit_target_2": False,
+        "hit_target_final": False,
+        "hit_stop_loss": False,
+        "prediction_result": "PENDING",
+        "themes": themes,
+        "memo": "test_recommendation_history",
+    }
+    history.append(item)
+    storage.save_recommendation_history(history, logger=logger)
+
+    lines = analyzer.section("🧪 추천이력 테스트 추가")
+    lines.append("테스트용 추천이력 1건을 저장했습니다.")
+    lines.append(f"종목명: **{name} ({ticker})**")
+    lines.append(f"진입구간: **{item['entry_zone']}**")
+    lines.append(f"진입 기준가: **{analyzer.format_price_for_ticker(entry_reference_price, ticker)}**")
+    lines.append(f"1차 목표가: **{analyzer.format_price_for_ticker(target_1, ticker)}**")
+    lines.append(f"2차 목표가: **{analyzer.format_price_for_ticker(target_2, ticker)}**")
+    lines.append(f"최종 목표가: **{analyzer.format_price_for_ticker(target_final, ticker)}**")
+    lines.append(f"손절가: **{analyzer.format_price_for_ticker(stop_price, ticker)}**")
+    lines.append("prediction_result: **PENDING**")
+    lines.append("")
+    lines.append("조회 가능 명령어: **/성과추적, /알고리즘성과, /분석성과**")
+    return "\n".join(lines).strip()
 
 
 def record_recommendation_history_with_entry_refs(
