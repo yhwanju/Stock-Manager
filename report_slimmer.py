@@ -25,6 +25,25 @@ def _plain(value: str) -> str:
     return value.replace("**", "").strip()
 
 
+def _price_only(value: str) -> str:
+    text = _plain(value)
+    for emoji in ("🟢", "🟡", "🔴"):
+        text = text.replace(emoji, "")
+    return text.strip() or "-"
+
+
+def _target_summary(block: str) -> list[str]:
+    targets = [
+        ("🟢", "1차 목표가", _price_only(_line_after(block, "1차 목표가:"))),
+        ("🟡", "2차 목표가", _price_only(_line_after(block, "2차 목표가:"))),
+        ("🔴", "최종 목표가", _price_only(_line_after(block, "최종 목표가:"))),
+    ]
+    lines = ["목표가 요약:"]
+    for emoji, label, price in targets:
+        lines.append(f"{emoji} {label}: **{price}**")
+    return lines
+
+
 def _section_from_report(report: str, title: str) -> str:
     marker = f"**{title}**"
     start = report.find(marker)
@@ -59,6 +78,32 @@ def _holding_keys() -> set[str]:
     return keys
 
 
+def _candidate_keys(name: str) -> set[str]:
+    normalized_name = analyzer.normalize_text(name)
+    keys = {normalized_name} if normalized_name else set()
+    for loader in (storage.load_watchlist, storage.load_holdings):
+        try:
+            items = loader()
+        except Exception:
+            items = []
+        for item in items:
+            item_name = analyzer.normalize_text(str(item.get("name", "")))
+            item_ticker = analyzer.normalize_text(str(item.get("ticker", "")))
+            if normalized_name and normalized_name in {item_name, item_ticker}:
+                if item_name:
+                    keys.add(item_name)
+                if item_ticker:
+                    keys.add(item_ticker)
+    try:
+        ticker_map = storage.load_ticker_map()
+    except Exception:
+        ticker_map = {}
+    for map_name, ticker in ticker_map.items():
+        if analyzer.normalize_text(str(map_name)) == normalized_name:
+            keys.add(analyzer.normalize_text(str(ticker)))
+    return keys
+
+
 def _split_stock_blocks(section_text: str) -> list[str]:
     blocks: list[str] = []
     current: list[str] = []
@@ -83,7 +128,7 @@ def _recommendation_blocks(original_report: str) -> list[str]:
     result: list[str] = []
     for block in _split_stock_blocks(text):
         name = _plain(_line_after(block, "종목명:"))
-        if analyzer.normalize_text(name) in held:
+        if _candidate_keys(name) & held:
             continue
         action = _plain(_line_after(block, "액션:"))
         entry = _plain(_line_after(block, "진입 가능 구간:"))
@@ -91,8 +136,9 @@ def _recommendation_blocks(original_report: str) -> list[str]:
         result.extend([
             f"종목명: **{name}**",
             f"액션: **{action}**",
-            f"진입: **{entry}**",
-            f"손절: **{stop}**",
+            f"진입구간: **{entry}**",
+            f"손절가: **{stop}**",
+            *_target_summary(block),
             "",
         ])
     if not result:
@@ -118,6 +164,9 @@ def _holding_summary(original_report: str) -> list[str]:
     result: list[str] = []
     for block in _split_stock_blocks(original_report):
         name = _plain(_line_after(block, "종목명:"))
+        quantity = _plain(_line_after(block, "보유수량:"))
+        average_price = _plain(_line_after(block, "평단:"))
+        current_price = _plain(_line_after(block, "현재가:"))
         return_pct = _plain(_line_after(block, "수익률:"))
         action = _plain(_line_after(block, "액션:"))
         stop = _plain(_line_after(block, "손절가:"))
@@ -125,9 +174,12 @@ def _holding_summary(original_report: str) -> list[str]:
             continue
         result.extend([
             f"종목명: **{name}**",
+            f"보유수량: **{quantity}**",
+            f"평단: **{average_price}**",
+            f"현재가: **{current_price}**",
             f"수익률: **{return_pct}**",
             f"액션: **{action}**",
-            f"손절: **{stop}**",
+            f"손절가: **{stop}**",
             "",
         ])
     return result or ["보유종목 없음"]
@@ -173,14 +225,6 @@ def _slim_holdings_report(original_report: str) -> str:
         "━━━━━━━━━━",
     ]
     lines.extend(_holding_summary(original_report))
-    lines.extend([
-        "━━━━━━━━━━",
-        "**⚠️ 리스크 원칙**",
-        "━━━━━━━━━━",
-        "* 추격매수 금지",
-        "* 손절가 이탈 종목 물타기 금지",
-        "* 변동성 확대 시 비중 축소 검토",
-    ])
     return "\n".join(lines).strip()
 
 
