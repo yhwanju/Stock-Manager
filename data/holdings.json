@@ -1,13 +1,5 @@
 [
   {
-    "name": "CJ씨푸드",
-    "ticker": "011150.KS",
-    "quantity": 1300,
-    "avg_price": 2663,
-    "themes": ["음식료"],
-    "subthemes": ["수산", "식품"]
-  },
-  {
     "name": "티에이치엔",
     "ticker": "019180.KS",
     "quantity": 300,
