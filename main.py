@@ -13,8 +13,8 @@ import storage
 import theme_universe
 
 
-SCHEDULE_REPORT_START_KST = time(8, 50)
-SCHEDULE_REPORT_END_KST = time(9, 10)
+SCHEDULE_REPORT_START_KST = time(9, 0)
+SCHEDULE_REPORT_END_KST = time(9, 20)
 
 
 def log(message: str) -> None:
