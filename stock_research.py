@@ -237,14 +237,21 @@ def _final_decision(analysis: analyzer.StockAnalysis, valuation: dict[str, Any])
     return "관망"
 
 
-def _targets_text(analysis: analyzer.StockAnalysis) -> str:
+def _target_summary_lines(analysis: analyzer.StockAnalysis) -> list[str]:
     levels = analysis.target_analysis.levels
-    if not levels:
-        return analyzer.format_price_for_ticker(analysis.target_price, analysis.ticker)
-    values = [analyzer.format_price_for_ticker(level.price, analysis.ticker) for level in levels[:3]]
-    while len(values) < 3:
-        values.append(DATA_MISSING)
-    return f"1차 {values[0]} / 2차 {values[1]} / 최종 {values[2]}"
+    labels = [
+        ("🟢", "1차 목표가"),
+        ("🟡", "2차 목표가"),
+        ("🔴", "최종 목표가"),
+    ]
+    lines: list[str] = []
+    for index, (emoji, label) in enumerate(labels):
+        if len(levels) > index:
+            price = levels[index].price
+        else:
+            price = analysis.target_price if index == 0 else None
+        lines.append(f"{emoji} {label}: {analyzer.bold(analyzer.format_price_for_ticker(price, analysis.ticker))}")
+    return lines
 
 
 def _append_quick_header(lines: list[str], analysis: analyzer.StockAnalysis) -> None:
@@ -279,7 +286,8 @@ def _append_final_judgment(lines: list[str], analysis: analyzer.StockAnalysis, v
     lines.append(f"판단: {analyzer.bold(_final_decision(analysis, valuation))}")
     lines.append(f"진입구간: {analyzer.bold(analysis.entry_zone)}")
     lines.append(f"손절 기준: {analyzer.bold(analyzer.format_price_for_ticker(analysis.stop_price, analysis.ticker))}")
-    lines.append(f"목표가: {analyzer.bold(_targets_text(analysis))}")
+    lines.append("목표가:")
+    lines.extend(_target_summary_lines(analysis))
     lines.append(f"확신도: {analyzer.bold(f'{confidence} / 100')}")
 
 
