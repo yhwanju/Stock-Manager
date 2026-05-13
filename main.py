@@ -6,7 +6,7 @@ from datetime import datetime, time, timezone
 
 import requests
 
-from analyzer import build_daily_reports
+import report_slimmer
 from config import DISCORD_CONTENT_LIMIT, KST, WEBHOOK_ENV_NAME
 import recommendation_state
 import storage
@@ -146,7 +146,7 @@ def main() -> int:
 
     theme_universe.patch_analyzer_theme_universe()
     recommendation_state.patch_analyzer_history_recorder()
-    reports = build_daily_reports(logger=log, record_recommendations=not dry_run)
+    reports = report_slimmer.build_daily_reports(logger=log, record_recommendations=not dry_run)
 
     if dry_run:
         log("발송 스킵: DRY_RUN 모드입니다.")
