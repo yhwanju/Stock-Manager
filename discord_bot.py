@@ -14,6 +14,7 @@ import market_group_output
 import recommendation_state
 import stock_research
 import storage
+import theme_auto_patch
 from config import BOT_TOKEN_ENV_NAME, DISCORD_CONTENT_LIMIT, KST
 
 
@@ -131,6 +132,14 @@ async def respond(interaction: discord.Interaction, handler: Callable, *args) ->
 async def on_ready() -> None:
     print("[stock-question-bot] Discord bot connected", flush=True)
     print(f"[stock-question-bot] logged in as {client.user}", flush=True)
+    try:
+        watchlist_updated, holdings_updated = await asyncio.to_thread(theme_auto_patch.patch_all_themes)
+        print(
+            f"[stock-question-bot] theme auto patch completed: watchlist {watchlist_updated}개, holdings {holdings_updated}개",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[stock-question-bot] theme auto patch failed: {exc}", flush=True)
 
 
 @client.tree.command(name="기능", description="주식관리봇 명령어 목록을 보여줍니다.")
