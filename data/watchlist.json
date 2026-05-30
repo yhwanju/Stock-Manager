@@ -16,5 +16,11 @@
     "ticker": "000150.KS",
     "themes": ["원전", "로봇", "전력"],
     "subthemes": ["SMR", "협동로봇", "전력기기"]
+  },
+  {
+    "name": "AAOI",
+    "ticker": "AAOI",
+    "themes": ["AI", "반도체"],
+    "subthemes": ["광통신", "데이터센터", "AI인프라"]
   }
 ]
