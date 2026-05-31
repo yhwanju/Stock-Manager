@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
 
 import analyzer
+import google_sheets_store
 import storage
 
 
@@ -21,6 +23,8 @@ _ORIGINAL_DEEP_CANDIDATES: Callable[..., list[dict[str, Any]]] | None = None
 _ORIGINAL_CONDITION_CANDIDATES: Callable[..., list[dict[str, Any]]] | None = None
 _ORIGINAL_STRONG_THEME_NAMES: Callable[[], str] | None = None
 _LAST_RECOMMENDATION_CANDIDATES: list[Any] = []
+_LAST_SHEET_SYNC_ATTEMPT = 0.0
+SHEET_SYNC_MIN_INTERVAL_SECONDS = 60.0
 
 
 def _emit_log(logger: Logger, message: str) -> None:
@@ -39,7 +43,18 @@ def recommendation_candidate_limit(theme_config: dict[str, Any] | None = None, d
     return max(1, min(limit, MAX_RECOMMENDATION_CANDIDATE_LIMIT))
 
 
+def sync_theme_universe_cache(logger: Logger = None, force: bool = False) -> dict[str, Any]:
+    global _LAST_SHEET_SYNC_ATTEMPT
+    now = time.monotonic()
+    if not force and now - _LAST_SHEET_SYNC_ATTEMPT < SHEET_SYNC_MIN_INTERVAL_SECONDS:
+        return google_sheets_store.last_theme_universe_sync_status()
+    _LAST_SHEET_SYNC_ATTEMPT = now
+    google_sheets_store.sync_theme_universe_from_sheet(logger=logger)
+    return google_sheets_store.last_theme_universe_sync_status()
+
+
 def load_theme_universe(logger: Logger = None) -> dict[str, list[str]]:
+    sync_theme_universe_cache(logger=logger)
     payload = storage.load_json_file(THEME_UNIVERSE_FILE, {}, logger=logger)
     if not isinstance(payload, dict):
         _emit_log(logger, f"{THEME_UNIVERSE_FILE} 로드 실패: 객체 형식이 아닙니다.")
@@ -237,9 +252,12 @@ def analyze_watchlist_with_theme_universe(context: Any) -> list[Any]:
     return watchlist_analyses
 
 
-def select_top_recommendations_with_theme_universe(watchlist: list[Any]) -> list[Any]:
+def select_top_recommendations_with_theme_universe(
+    watchlist: list[Any],
+    holdings: list[dict[str, Any]] | None = None,
+) -> list[Any]:
     candidates = _LAST_RECOMMENDATION_CANDIDATES or watchlist
-    return _ORIGINAL_SELECT_TOP(candidates) if _ORIGINAL_SELECT_TOP else []
+    return _ORIGINAL_SELECT_TOP(candidates, holdings) if _ORIGINAL_SELECT_TOP else []
 
 
 def build_deep_analysis_candidates(max_count: int | None = None) -> list[dict[str, Any]]:
@@ -292,6 +310,43 @@ def strong_theme_stock_names() -> str:
     return "\n".join(lines)
 
 
+def universe_summary_text(logger: Logger = None) -> str:
+    sync_theme_universe_cache(logger=logger, force=True)
+    summary = google_sheets_store.theme_universe_summary(logger=logger)
+    status = summary.get("sync_status", {})
+    status_text = str(status.get("status", "unknown"))
+    reason = str(status.get("reason", "") or "")
+    synced_at = str(status.get("synced_at", "") or "-")
+
+    lines = analyzer.section("🧭 유니버스 요약")
+    lines.append(f"총 종목 수: {analyzer.bold(str(summary.get('total_tickers', 0)))}")
+    lines.append("")
+    lines.append("시장별 종목 수:")
+    market_counts = summary.get("market_counts", {})
+    if market_counts:
+        for market, count in market_counts.items():
+            lines.append(f"* {market}: {analyzer.bold(str(count))}")
+    else:
+        lines.append("* 캐시에는 시장 정보가 없습니다.")
+
+    lines.append("")
+    lines.append("테마별 상위 10개:")
+    theme_counts = summary.get("theme_counts", {})
+    if theme_counts:
+        for theme, count in theme_counts.items():
+            lines.append(f"* {theme}: {analyzer.bold(str(count))}")
+    else:
+        lines.append("* 테마 데이터 없음")
+
+    lines.append("")
+    lines.append(f"마지막 동기화 상태: {analyzer.bold(status_text)}")
+    lines.append(f"동기화 시각: {analyzer.bold(synced_at)}")
+    if reason:
+        lines.append(f"사유: {reason}")
+    lines.append(f"데이터 기준: {summary.get('source', '-')}")
+    return "\n".join(lines).strip()
+
+
 def patch_analyzer_theme_universe() -> None:
     global _PATCHED
     global _ORIGINAL_ANALYZE_WATCHLIST
@@ -301,6 +356,8 @@ def patch_analyzer_theme_universe() -> None:
     global _ORIGINAL_EXTRACT_THEMES
     global _ORIGINAL_SELECT_TOP
     global _ORIGINAL_STRONG_THEME_NAMES
+
+    sync_theme_universe_cache()
 
     if _PATCHED:
         return

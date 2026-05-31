@@ -14,8 +14,11 @@ import market_group_output
 import recommendation_state
 import stock_research
 import storage
-import theme_auto_patch
+import theme_universe
 from config import BOT_TOKEN_ENV_NAME, DISCORD_CONTENT_LIMIT, KST
+
+
+_theme_auto_patch_done = False
 
 
 def split_message(content: str, limit: int = DISCORD_CONTENT_LIMIT) -> list[str]:
@@ -130,16 +133,18 @@ async def respond(interaction: discord.Interaction, handler: Callable, *args) ->
 
 @client.event
 async def on_ready() -> None:
+    global _theme_auto_patch_done
     print("[stock-question-bot] Discord bot connected", flush=True)
     print(f"[stock-question-bot] logged in as {client.user}", flush=True)
-    try:
-        watchlist_updated, holdings_updated = await asyncio.to_thread(theme_auto_patch.patch_all_themes)
-        print(
-            f"[stock-question-bot] theme auto patch completed: watchlist {watchlist_updated}개, holdings {holdings_updated}개",
-            flush=True,
-        )
-    except Exception as exc:
-        print(f"[stock-question-bot] theme auto patch failed: {exc}", flush=True)
+    if not _theme_auto_patch_done:
+        _theme_auto_patch_done = True
+        try:
+            await asyncio.to_thread(
+                storage.auto_patch_themes_from_universe,
+                logger=lambda message: print(f"[stock-question-bot] {message}", flush=True),
+            )
+        except Exception as exc:
+            print(f"[stock-question-bot] theme auto patch failed: {exc}", flush=True)
 
 
 @client.tree.command(name="기능", description="주식관리봇 명령어 목록을 보여줍니다.")
@@ -297,6 +302,16 @@ async def strong_themes_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.strong_themes)
 
 
+@client.tree.command(name="유니버스요약", description="theme_universe 동기화 상태와 종목 수를 보여줍니다.")
+async def universe_summary_command(interaction: discord.Interaction) -> None:
+    await respond(interaction, bot_commands.universe_summary)
+
+
+@client.tree.command(name="데이터상태", description="Google Sheets 연결과 데이터 개수를 확인합니다.")
+async def data_status_command(interaction: discord.Interaction) -> None:
+    await respond(interaction, bot_commands.data_status)
+
+
 @client.tree.command(name="물림", description="손절가, 버틸 구간, 시간손절 기준을 분석합니다.")
 @app_commands.describe(종목명="종목명 또는 티커", 평단="평균 단가")
 async def stuck_command(interaction: discord.Interaction, 종목명: str, 평단: float) -> None:
@@ -320,6 +335,11 @@ def main() -> int:
     if not token:
         raise RuntimeError(f"{BOT_TOKEN_ENV_NAME} 환경 변수가 설정되어 있지 않습니다.")
     storage.run_daily_backup_if_due()
+    storage.sync_sheets_to_json(logger=lambda message: print(f"[stock-question-bot] {message}", flush=True))
+    theme_universe.sync_theme_universe_cache(
+        logger=lambda message: print(f"[stock-question-bot] {message}", flush=True),
+        force=True,
+    )
     start_health_server()
     print("[stock-question-bot] Discord bot login started", flush=True)
     client.run(token)

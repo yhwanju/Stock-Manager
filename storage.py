@@ -6,6 +6,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
 
 from config import (
     ALERTS_FILE,
@@ -36,6 +37,63 @@ DATA_FILES = {
     TRADE_HISTORY_FILE,
     WATCHLIST_FILE,
 }
+SHEET_SYNC_FILES = {
+    ALERTS_FILE: "alerts",
+    HOLDINGS_FILE: "holdings",
+    RECOMMENDATION_HISTORY_FILE: "recommendation_history",
+    TRADE_HISTORY_FILE: "trade_history",
+    WATCHLIST_FILE: "watchlist",
+}
+SHEET_SCOPES = ("https://www.googleapis.com/auth/spreadsheets",)
+SHEET_API_BASE = "https://sheets.googleapis.com/v4/spreadsheets"
+GOOGLE_SHEET_ID_ENV = "GOOGLE_SHEET_ID"
+GOOGLE_SERVICE_ACCOUNT_JSON_ENV = "GOOGLE_SERVICE_ACCOUNT_JSON"
+GOOGLE_SERVICE_ACCOUNT_FILE_ENV = "GOOGLE_SERVICE_ACCOUNT_FILE"
+DEFAULT_GOOGLE_SHEET_ID = "103QZu66G5eONaBLPjBMZ8FoNpLkTnSHXwyjVd_Neq8A"
+PREFERRED_SHEET_HEADERS = {
+    HOLDINGS_FILE: ["name", "ticker", "quantity", "avg_price", "themes", "subthemes"],
+    WATCHLIST_FILE: ["name", "ticker", "themes", "subthemes"],
+    TRADE_HISTORY_FILE: ["date", "name", "ticker", "action", "quantity", "price", "memo"],
+    RECOMMENDATION_HISTORY_FILE: [
+        "recommendation_id",
+        "date",
+        "name",
+        "ticker",
+        "price",
+        "entry_low",
+        "entry_high",
+        "entry_reference_price",
+        "entry_zone",
+        "action",
+        "quant_score",
+        "timing_score",
+        "market_state",
+        "theme_strength",
+        "confidence_score",
+        "predicted_best_target",
+        "actual_best_target",
+        "target_1",
+        "target_2",
+        "target_final",
+        "target_price",
+        "stop_price",
+        "entry_triggered",
+        "entry_triggered_at",
+        "hit_target_1",
+        "hit_target_2",
+        "hit_target_final",
+        "hit_stop_loss",
+        "prediction_result",
+        "themes",
+        "memo",
+    ],
+    ALERTS_FILE: ["name", "ticker", "condition", "price", "created_at", "memo"],
+}
+THEME_UNIVERSE_FILE = "theme_universe.json"
+UNCLASSIFIED_THEME = "미분류"
+_sheet_session: Any | None = None
+_sheet_titles: set[str] | None = None
+_sheet_write_failed_files: set[str] = set()
 
 
 def describe_payload(payload: Any) -> str:
@@ -174,10 +232,16 @@ def _load_local_json_file(file_name: str, default: Any, *, required: bool = Fals
 
 
 def load_json_file(file_name: str, default: Any, *, required: bool = False, logger: Logger = None) -> Any:
+    if file_name in SHEET_SYNC_FILES and file_name not in _sheet_write_failed_files:
+        payload = _load_sheet_json_file(file_name, logger=logger)
+        if payload is not None:
+            _save_local_json_file(file_name, payload, logger=logger)
+            log(logger, f"{file_name} Sheets → JSON 동기화 완료: {describe_payload(payload)}")
+            return payload
     return _load_local_json_file(file_name, default, required=required, logger=logger)
 
 
-def save_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
+def _save_local_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
     run_daily_backup_if_due(logger=logger)
     path = json_file_path(file_name)
     log(logger, f"{file_name} 저장 파일 경로: {path}")
@@ -214,6 +278,279 @@ def save_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
     log(logger, f"{file_name} 저장 성공: {describe_payload(payload)} / 경로: {path}")
 
 
+def save_json_file(file_name: str, payload: Any, logger: Logger = None) -> None:
+    _save_local_json_file(file_name, payload, logger=logger)
+    if file_name not in SHEET_SYNC_FILES:
+        return
+    if _save_sheet_json_file(file_name, payload, logger=logger):
+        _sheet_write_failed_files.discard(file_name)
+        return
+    _sheet_write_failed_files.add(file_name)
+    log(logger, f"{file_name} Sheets 저장 실패: 로컬 JSON 저장은 유지합니다.")
+
+
+def _google_sheet_id() -> str:
+    return os.getenv(GOOGLE_SHEET_ID_ENV, "").strip() or DEFAULT_GOOGLE_SHEET_ID
+
+
+def _google_service_account_info(logger: Logger = None) -> dict[str, Any] | None:
+    raw = os.getenv(GOOGLE_SERVICE_ACCOUNT_JSON_ENV, "").strip()
+    if not raw:
+        raw = os.getenv(GOOGLE_SERVICE_ACCOUNT_FILE_ENV, "").strip()
+    try:
+        if raw.startswith("{"):
+            return json.loads(raw)
+        if not raw:
+            return None
+        with Path(raw).expanduser().open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except Exception as exc:
+        log(logger, f"{GOOGLE_SERVICE_ACCOUNT_JSON_ENV} 파싱 실패: {exc}")
+        return None
+
+
+def _sheet_sync_configured(logger: Logger = None) -> bool:
+    if not _google_sheet_id():
+        return False
+    if not (
+        os.getenv(GOOGLE_SERVICE_ACCOUNT_JSON_ENV, "").strip()
+        or os.getenv(GOOGLE_SERVICE_ACCOUNT_FILE_ENV, "").strip()
+    ):
+        return False
+    return True
+
+
+def _sheet_authorized_session(logger: Logger = None):
+    global _sheet_session
+    if _sheet_session is not None:
+        return _sheet_session
+    if not _sheet_sync_configured(logger=logger):
+        return None
+    try:
+        from google.auth.transport.requests import AuthorizedSession
+        from google.oauth2 import service_account
+    except Exception as exc:
+        log(logger, f"Google Sheets 인증 라이브러리 로드 실패: {exc}")
+        return None
+
+    info = _google_service_account_info(logger=logger)
+    if not info:
+        return None
+    try:
+        credentials = service_account.Credentials.from_service_account_info(info, scopes=SHEET_SCOPES)
+        _sheet_session = AuthorizedSession(credentials)
+        return _sheet_session
+    except Exception as exc:
+        log(logger, f"Google Sheets 인증 실패: {exc}")
+        return None
+
+
+def _sheet_url(path: str) -> str:
+    separator = "" if path.startswith(("?", ":")) else "/"
+    return f"{SHEET_API_BASE}/{_google_sheet_id()}{separator}{path}"
+
+
+def _raise_for_sheet_response(response: Any) -> None:
+    if response.status_code >= 400:
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}")
+
+
+def _load_sheet_titles(logger: Logger = None) -> set[str]:
+    global _sheet_titles
+    if _sheet_titles is not None:
+        return _sheet_titles
+    session = _sheet_authorized_session(logger=logger)
+    if session is None:
+        return set()
+    response = session.get(_sheet_url("?fields=sheets.properties.title"), timeout=20)
+    _raise_for_sheet_response(response)
+    payload = response.json()
+    _sheet_titles = {
+        str(sheet.get("properties", {}).get("title", ""))
+        for sheet in payload.get("sheets", [])
+        if sheet.get("properties", {}).get("title")
+    }
+    return _sheet_titles
+
+
+def _ensure_sheet_exists(sheet_name: str, logger: Logger = None) -> None:
+    global _sheet_titles
+    titles = _load_sheet_titles(logger=logger)
+    if sheet_name in titles:
+        return
+    session = _sheet_authorized_session(logger=logger)
+    if session is None:
+        raise RuntimeError("Google Sheets 인증 세션이 없습니다.")
+    body = {"requests": [{"addSheet": {"properties": {"title": sheet_name}}}]}
+    response = session.post(_sheet_url(":batchUpdate"), json=body, timeout=20)
+    _raise_for_sheet_response(response)
+    _sheet_titles = set(titles)
+    _sheet_titles.add(sheet_name)
+    log(logger, f"Google Sheets 탭 생성: {sheet_name}")
+
+
+def _sheet_range(sheet_name: str, cell_range: str = "A:ZZ") -> str:
+    return quote(f"{sheet_name}!{cell_range}", safe="")
+
+
+def _sheet_cell_from_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    return value
+
+
+def _sheet_headers(file_name: str, items: list[dict[str, Any]]) -> list[str]:
+    headers: list[str] = []
+    for header in PREFERRED_SHEET_HEADERS.get(file_name, []):
+        if header not in headers:
+            headers.append(header)
+    for item in items:
+        for key in item.keys():
+            if key not in headers:
+                headers.append(key)
+    return headers
+
+
+def _sheet_rows_from_items(file_name: str, items: list[dict[str, Any]]) -> list[list[Any]]:
+    headers = _sheet_headers(file_name, items)
+    rows = [headers]
+    for item in items:
+        rows.append([_sheet_cell_from_value(item.get(header, "")) for header in headers])
+    return rows
+
+
+def _parse_sheet_cell(header: str, value: Any) -> Any:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text == "":
+        return ""
+    lower = text.lower()
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    if lower == "null":
+        return None
+    if text.startswith(("[", "{")):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return value
+    if _looks_numeric_header(header):
+        try:
+            number = float(text.replace(",", ""))
+        except ValueError:
+            return value
+        return int(number) if number.is_integer() else number
+    return value
+
+
+def _looks_numeric_header(header: str) -> bool:
+    normalized = header.lower()
+    numeric_names = {
+        "quantity",
+        "avg_price",
+        "average_price",
+        "price",
+        "entry_low",
+        "entry_high",
+        "entry_reference_price",
+        "quant_score",
+        "timing_score",
+        "theme_strength",
+        "confidence_score",
+        "target_1",
+        "target_2",
+        "target_final",
+        "target_price",
+        "stop_price",
+        "return_pct",
+    }
+    return (
+        normalized in numeric_names
+        or normalized.endswith("_price")
+        or normalized.endswith("_score")
+        or normalized.endswith("_pct")
+    )
+
+
+def _items_from_sheet_rows(values: list[list[Any]]) -> list[dict[str, Any]]:
+    if not values:
+        return []
+    headers = [str(header).strip() for header in values[0]]
+    items: list[dict[str, Any]] = []
+    for row in values[1:]:
+        if not any(str(value).strip() for value in row):
+            continue
+        item: dict[str, Any] = {}
+        for index, header in enumerate(headers):
+            if not header:
+                continue
+            value = row[index] if index < len(row) else ""
+            if str(value).strip() == "":
+                continue
+            item[header] = _parse_sheet_cell(header, value)
+        items.append(item)
+    return items
+
+
+def _load_sheet_json_file(file_name: str, logger: Logger = None) -> list[dict[str, Any]] | None:
+    try:
+        import google_sheets_store
+
+        payload = google_sheets_store.load_items_from_sheet_for_file(file_name, logger=logger)
+        if payload is None:
+            return None
+        if not payload:
+            local_payload = _load_local_json_file(file_name, [], logger=logger)
+            if isinstance(local_payload, list) and local_payload:
+                sheet_name = SHEET_SYNC_FILES.get(file_name, file_name)
+                google_sheets_store.mark_sheet_fallback(sheet_name, "sheet is empty; local JSON has data", rows=len(local_payload))
+                log(logger, f"{file_name} Sheets가 비어 있어 기존 JSON 캐시를 사용합니다.")
+                return None
+        return payload
+    except Exception as exc:
+        log(logger, f"{file_name} Sheets 로드 실패: {exc}. 기존 JSON으로 진행합니다.")
+        return None
+
+
+def _save_sheet_json_file(file_name: str, payload: Any, logger: Logger = None) -> bool:
+    try:
+        import google_sheets_store
+
+        if not isinstance(payload, list):
+            log(logger, f"{file_name} Sheets 저장 스킵: 목록 형식이 아닙니다.")
+            return False
+        return google_sheets_store.save_items_to_sheet_for_file(file_name, payload, logger=logger)
+    except Exception as exc:
+        log(logger, f"{file_name} Sheets 저장 실패: {exc}")
+        return False
+
+
+def sync_sheets_to_json(logger: Logger = None) -> dict[str, str]:
+    results: dict[str, str] = {}
+    for file_name in SHEET_SYNC_FILES:
+        payload = _load_sheet_json_file(file_name, logger=logger)
+        if payload is None:
+            results[file_name] = "fallback_json"
+            continue
+        _save_local_json_file(file_name, payload, logger=logger)
+        _sheet_write_failed_files.discard(file_name)
+        results[file_name] = "synced"
+    return results
+
+
+def migrate_json_to_sheets(logger: Logger = None, *, dry_run: bool = True, clear: bool = False) -> dict[str, str]:
+    import google_sheets_store
+
+    return google_sheets_store.migrate_json_to_sheets(logger=logger, dry_run=dry_run, clear=clear)
+
+
 def normalize(value: str) -> str:
     return value.strip().lower().replace(" ", "")
 
@@ -233,22 +570,7 @@ def save_watchlist(items: list[dict[str, Any]], logger: Logger = None) -> None:
 def load_holdings(logger: Logger = None) -> list[dict[str, Any]]:
     path = json_file_path(HOLDINGS_FILE)
     log(logger, f"holdings 읽기 경로 확인: {path}")
-    if path.exists():
-        try:
-            payload = _load_json_from_path(path)
-        except json.JSONDecodeError as exc:
-            if restore_backup_file(HOLDINGS_FILE, logger=logger):
-                try:
-                    payload = _load_json_from_path(path)
-                    log(logger, f"{HOLDINGS_FILE} JSON 깨짐 감지 후 .bak 자동 복구 성공: {path}")
-                except Exception as restore_exc:
-                    raise IOError(f"holdings .bak 복구 후 재로드 실패: {restore_exc}. 경로: {path}") from restore_exc
-            else:
-                raise IOError(f"holdings 로드 실패: JSON 파싱 오류 - {exc}. 경로: {path}") from exc
-        log(logger, f"{HOLDINGS_FILE} 로드 성공: {describe_payload(payload)} / 경로: {path}")
-    else:
-        payload = load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
-
+    payload = load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
     if not isinstance(payload, list):
         raise IOError(f"holdings 로드 실패: 목록 형식이 아닙니다. 경로: {path}")
     log(logger, f"holdings 읽기 완료: {len(payload)}개 / 경로: {storage_location_text(HOLDINGS_FILE)}")
@@ -267,7 +589,7 @@ def save_holdings(
     if previous_count is not None:
         log(logger, f"기존 holdings: {previous_count}개")
     save_json_file(HOLDINGS_FILE, items, logger=logger)
-    verified = load_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
+    verified = _load_local_json_file(HOLDINGS_FILE, [], required=True, logger=logger)
     if not isinstance(verified, list):
         restore_backup_file(HOLDINGS_FILE, logger=logger)
         raise IOError(f"holdings 저장 검증 실패: 다시 읽은 데이터가 목록 형식이 아닙니다. 경로: {path}")
@@ -282,6 +604,172 @@ def save_holdings(
         restore_backup_file(HOLDINGS_FILE, logger=logger)
         raise IOError(f"holdings 저장 검증 실패: 저장 요청 데이터와 재읽기 데이터가 다릅니다. 경로: {path}")
     log(logger, f"holdings 저장 검증 성공: {len(verified)}개 / 경로: {path}")
+
+
+def _theme_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, list):
+        values: list[str] = []
+        for item in value:
+            stripped = str(item).strip()
+            if stripped:
+                values.append(stripped)
+        return values
+    stripped = str(value).strip()
+    return [stripped] if stripped else []
+
+
+def is_unclassified_theme(value: Any) -> bool:
+    values = _theme_values(value)
+    if not values:
+        return True
+    return all(theme == UNCLASSIFIED_THEME for theme in values)
+
+
+def _ticker_lookup_keys(ticker: Any) -> list[str]:
+    key = str(ticker or "").strip().upper()
+    if not key:
+        return []
+    keys = [key]
+    if "." in key:
+        base_key = key.split(".", 1)[0]
+        if base_key and base_key not in keys:
+            keys.append(base_key)
+    return keys
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value and value not in values:
+        values.append(value)
+
+
+def _theme_universe_ticker_index(logger: Logger = None) -> dict[str, list[str]]:
+    payload = load_json_file(THEME_UNIVERSE_FILE, {}, logger=logger)
+    if not isinstance(payload, dict):
+        log(logger, f"{THEME_UNIVERSE_FILE} 로드 실패: 객체 형식이 아닙니다.")
+        return {}
+
+    ticker_theme_index: dict[str, list[str]] = {}
+    for theme, tickers in payload.items():
+        theme_name = str(theme).strip()
+        if not theme_name:
+            continue
+
+        if isinstance(tickers, str):
+            ticker_values = [tickers]
+        elif isinstance(tickers, list):
+            ticker_values = tickers
+        else:
+            continue
+
+        for ticker in ticker_values:
+            for key in _ticker_lookup_keys(ticker):
+                themes = ticker_theme_index.setdefault(key, [])
+                _append_unique(themes, theme_name)
+    return ticker_theme_index
+
+
+def _item_allows_theme_patch(item: dict[str, Any]) -> bool:
+    return is_unclassified_theme(item.get("themes")) and is_unclassified_theme(item.get("theme"))
+
+
+def _display_theme_value(item: dict[str, Any]) -> str:
+    themes = _theme_values(item.get("themes"))
+    if themes:
+        return ", ".join(themes)
+    theme = _theme_values(item.get("theme"))
+    if theme:
+        return ", ".join(theme)
+    return UNCLASSIFIED_THEME
+
+
+def _themes_for_ticker(ticker: Any, ticker_theme_index: dict[str, list[str]]) -> list[str]:
+    themes: list[str] = []
+    for key in _ticker_lookup_keys(ticker):
+        for theme in ticker_theme_index.get(key, []):
+            _append_unique(themes, theme)
+    return themes
+
+
+def _patch_item_themes(
+    items: list[dict[str, Any]],
+    ticker_theme_index: dict[str, list[str]],
+    logger: Logger = None,
+) -> int:
+    updated = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        ticker = str(item.get("ticker", "")).strip()
+        themes = _themes_for_ticker(ticker, ticker_theme_index)
+        if not ticker or not themes or not _item_allows_theme_patch(item):
+            continue
+
+        before = _display_theme_value(item)
+        item["themes"] = themes
+        if "theme" in item:
+            item["theme"] = themes[0]
+
+        log(logger, f"[테마 자동 보정]\n{ticker}:\n{before} → {', '.join(themes)}")
+        updated += 1
+    return updated
+
+
+def _verify_theme_patch_save(file_name: str, expected_items: list[dict[str, Any]], logger: Logger = None) -> None:
+    verified = _load_local_json_file(file_name, [], required=True, logger=logger)
+    if verified == expected_items:
+        log(logger, f"{file_name} 자동 보정 저장 후 재로드 검증 성공: {len(expected_items)}개")
+        return
+    log(logger, f"{file_name} 자동 보정 저장 후 재로드 검증 실패: 저장 데이터가 재로드 데이터와 다릅니다.")
+
+
+def patch_watchlist_themes(
+    logger: Logger = None,
+    *,
+    ticker_theme_index: dict[str, list[str]] | None = None,
+) -> int:
+    index = ticker_theme_index or _theme_universe_ticker_index(logger=logger)
+    if not index:
+        return 0
+
+    items = load_watchlist(logger=logger)
+    updated = _patch_item_themes(items, index, logger=logger)
+    if updated:
+        save_watchlist(items, logger=logger)
+        _verify_theme_patch_save(WATCHLIST_FILE, items, logger=logger)
+    return updated
+
+
+def patch_holdings_themes(
+    logger: Logger = None,
+    *,
+    ticker_theme_index: dict[str, list[str]] | None = None,
+) -> int:
+    index = ticker_theme_index or _theme_universe_ticker_index(logger=logger)
+    if not index:
+        return 0
+
+    items = load_holdings(logger=logger)
+    updated = _patch_item_themes(items, index, logger=logger)
+    if updated:
+        save_holdings(items, logger=logger)
+        _verify_theme_patch_save(HOLDINGS_FILE, items, logger=logger)
+    return updated
+
+
+def auto_patch_themes_from_universe(logger: Logger = None) -> dict[str, int]:
+    index = _theme_universe_ticker_index(logger=logger)
+    if not index:
+        return {"watchlist": 0, "holdings": 0}
+    return {
+        "watchlist": patch_watchlist_themes(logger=logger, ticker_theme_index=index),
+        "holdings": patch_holdings_themes(logger=logger, ticker_theme_index=index),
+    }
 
 
 def load_trade_history(logger: Logger = None) -> list[dict[str, Any]]:
@@ -316,8 +804,8 @@ def load_alerts(logger: Logger = None) -> list[dict[str, Any]]:
     return load_json_file(ALERTS_FILE, [], logger=logger)
 
 
-def save_alerts(items: list[dict[str, Any]]) -> None:
-    save_json_file(ALERTS_FILE, items)
+def save_alerts(items: list[dict[str, Any]], logger: Logger = None) -> None:
+    save_json_file(ALERTS_FILE, items, logger=logger)
 
 
 def load_ticker_map(logger: Logger = None) -> dict[str, str]:

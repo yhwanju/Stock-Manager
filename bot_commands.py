@@ -5,7 +5,9 @@ from datetime import datetime
 from typing import Any
 
 import analyzer
+import google_sheets_store
 import storage
+import theme_universe
 from config import KST
 
 
@@ -91,6 +93,12 @@ def help_text() -> str:
 /강한테마
 → 뉴스봇 기반 오늘 강한 테마를 보여줍니다.
 
+/유니버스요약
+→ Google Sheets theme_universe 동기화 상태와 종목 수를 보여줍니다.
+
+/데이터상태
+→ Google Sheets 연결과 주요 데이터 개수를 확인합니다.
+
 /물림 종목명 평단
 → 손절가, 버틸 구간, 시간손절 기준을 분석합니다.
 
@@ -107,6 +115,27 @@ def stock_analysis(query: str) -> str:
 
 def strong_theme_stocks() -> str:
     return analyzer.strong_theme_stock_names()
+
+
+def universe_summary() -> str:
+    return theme_universe.universe_summary_text(logger=command_log)
+
+
+def data_status() -> str:
+    status = google_sheets_store.data_status(logger=command_log)
+    counts = status.get("counts", {})
+    lines = analyzer.section("🗄️ 데이터 상태")
+    lines.append(f"Sheets 설정: {analyzer.bold('완료' if status.get('configured') else '미설정')}")
+    lines.append(f"Sheets 연결: {analyzer.bold('성공' if status.get('connected') else '실패/미확인')}")
+    lines.append(f"fallback 사용: {analyzer.bold('예' if status.get('fallback_used') else '아니오')}")
+    lines.append("")
+    lines.append(f"holdings: {analyzer.bold(str(counts.get('holdings', 0)))}")
+    lines.append(f"watchlist: {analyzer.bold(str(counts.get('watchlist', 0)))}")
+    lines.append(f"recommendation_history: {analyzer.bold(str(counts.get('recommendation_history', 0)))}")
+    lines.append(f"trade_history: {analyzer.bold(str(counts.get('trade_history', 0)))}")
+    lines.append(f"alerts: {analyzer.bold(str(counts.get('alerts', 0)))}")
+    lines.append(f"theme_universe: {analyzer.bold(str(counts.get('theme_universe', 0)))}")
+    return "\n".join(lines).strip()
 
 
 def _format_watchlist_item(prefix: str, item: dict, warning: str = "") -> str:
