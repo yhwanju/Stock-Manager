@@ -521,6 +521,49 @@ def load_theme_universe_from_sheet(logger: Logger = None) -> list[dict[str, Any]
     return _load_items_from_sheet("theme_universe", logger=logger) or []
 
 
+def theme_universe_rows(logger: Logger = None) -> list[dict[str, Any]]:
+    rows = _last_loaded_rows_by_sheet.get("theme_universe")
+    if rows is None and is_configured():
+        rows = load_theme_universe_from_sheet(logger=logger)
+    if rows:
+        return [_normalize_item("theme_universe", row) for row in rows if isinstance(row, dict)]
+
+    payload = storage.load_json_file(THEME_UNIVERSE_FILE, {}, logger=logger)
+    if not isinstance(payload, dict):
+        return []
+
+    fallback_rows: list[dict[str, Any]] = []
+    for theme, tickers in payload.items():
+        if isinstance(tickers, str):
+            ticker_values = [tickers]
+        elif isinstance(tickers, list):
+            ticker_values = tickers
+        else:
+            continue
+        for ticker in ticker_values:
+            normalized_ticker = _normalize_ticker(ticker)
+            if not normalized_ticker:
+                continue
+            fallback_rows.append(
+                _normalize_item(
+                    "theme_universe",
+                    {
+                        "ticker": normalized_ticker,
+                        "name": normalized_ticker,
+                        "market": infer_market(normalized_ticker),
+                        "themes": [str(theme).strip()],
+                        "subthemes": [],
+                        "benefit_type": "",
+                        "role": "",
+                        "priority": "",
+                        "status": "active",
+                        "memo": "json fallback",
+                    },
+                )
+            )
+    return fallback_rows
+
+
 def _theme_universe_cache_from_rows(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
     universe: dict[str, list[str]] = {}
     seen_by_theme: dict[str, set[str]] = {}

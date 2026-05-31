@@ -1174,6 +1174,37 @@ def append_target_price_analysis(
     lines.append("")
 
 
+def target_price_summary_lines(
+    analysis: StockAnalysis,
+    target_analysis: TargetPriceAnalysis | None = None,
+) -> list[str]:
+    target_analysis = target_analysis or analysis.target_analysis
+    levels = target_analysis.levels
+    labels = [
+        ("🟢", "1차 목표가"),
+        ("🟡", "2차 목표가"),
+        ("🔴", "최종 목표가"),
+    ]
+    summary: list[str] = []
+    for index, (emoji, label) in enumerate(labels):
+        if len(levels) > index:
+            price = levels[index].price
+        else:
+            price = analysis.target_price if index == 0 else None
+        summary.append(f"{emoji} {label}: {bold(format_price_for_ticker(price, analysis.ticker))}")
+    return summary
+
+
+def append_target_price_summary(
+    lines: list[str],
+    analysis: StockAnalysis,
+    target_analysis: TargetPriceAnalysis | None = None,
+) -> None:
+    lines.append("목표가 요약:")
+    lines.extend(target_price_summary_lines(analysis, target_analysis))
+    lines.append("")
+
+
 def append_risk_block(lines: list[str], action: str, market_state: str) -> None:
     lines.append("리스크:")
     lines.append("* 손절가 이탈 시 추세 훼손")
@@ -1227,9 +1258,11 @@ def build_daily_report_messages(
     watchlist: list[StockAnalysis],
     holdings: list[dict[str, Any]],
     holding_analyses: dict[str, StockAnalysis],
+    recommendations: list[StockAnalysis] | None = None,
 ) -> list[str]:
     now = datetime.now(KST)
-    recommendations = select_top_recommendations(watchlist)
+    if recommendations is None:
+        recommendations = select_top_recommendations(watchlist, holdings)
     new_entry_action = "관망"
     if recommendations and recommendations[0].final_action in {"매수가능", "분할매수", "선별매수", "소액분할매수"}:
         new_entry_action = recommendations[0].final_action
@@ -1257,20 +1290,12 @@ def build_daily_report_messages(
     if recommendations:
         for item in recommendations:
             message1.append(f"종목명: {bold(item.name)}")
-            message1.append(f"퀀트 점수: {bold(item.quant_score)}")
-            message1.append(f"매매 타이밍 점수: {bold(item.timing_score)}")
             message1.append(f"액션: {bold(item.final_action)}")
-            message1.append("")
             message1.append("진입 가능 구간:")
             message1.append(item.entry_zone)
             message1.append("")
-            append_price_block(message1, "손절가", item.stop_price)
-            append_target_price_analysis(message1, item)
-            message1.append("근거:")
-            message1.append("")
-            for reason in item.reason_bullets:
-                message1.append(f"* {reason}")
-            message1.append("")
+            append_price_block(message1, "손절가", item.stop_price, item.ticker)
+            append_target_price_summary(message1, item)
     else:
         message1.append("추천 가능 종목 없음")
         message1.append("")
@@ -1297,7 +1322,7 @@ def build_daily_report_messages(
         analysis = holding_analyses[ticker]
         quantity = int(holding["quantity"])
         average_price = holding_average_price(holding)
-        action, stop_price, target_price = holding_action(analysis, quantity, average_price, market.state)
+        action, stop_price, _target_price = holding_action(analysis, quantity, average_price, market.state)
         profit_pct = None
         if analysis.current_price:
             profit_pct = ((analysis.current_price / average_price) - 1) * 100
@@ -1309,11 +1334,7 @@ def build_daily_report_messages(
         message2.append(f"현재가: {bold(format_price_for_ticker(analysis.current_price, ticker))}")
         message2.append(f"수익률: {bold(format_pct(profit_pct))}")
         message2.append(f"액션: {bold(action)}")
-        message2.append("")
-        holding_target_analysis = position_target_price_analysis(analysis, average_price, target_price)
-        append_target_price_analysis(message2, analysis, holding_target_analysis)
         append_price_block(message2, "손절가", stop_price, ticker)
-        append_risk_block(message2, action, market.state)
         if analysis.error:
             message2.append(f"오류: {analysis.error}")
             message2.append("")
@@ -1326,8 +1347,32 @@ def build_daily_report_messages(
     return ["\n".join(message1).strip(), "\n".join(message2).strip()]
 
 
-def select_top_recommendations(watchlist: list[StockAnalysis]) -> list[StockAnalysis]:
-    recommendation_pool = [item for item in watchlist if not item.error]
+def holding_ticker_keys(holdings: list[dict[str, Any]]) -> set[str]:
+    return {
+        storage.normalize(str(holding.get("ticker", "")))
+        for holding in holdings
+        if str(holding.get("ticker", "")).strip()
+    }
+
+
+def infer_stock_market(ticker: str) -> str:
+    normalized = str(ticker or "").upper()
+    if normalized.endswith(".KS"):
+        return "KOSPI"
+    if normalized.endswith(".KQ"):
+        return "KOSDAQ"
+    return "NASDAQ" if normalized else ""
+
+
+def select_top_recommendations(
+    watchlist: list[StockAnalysis],
+    holdings: list[dict[str, Any]] | None = None,
+) -> list[StockAnalysis]:
+    held_tickers = holding_ticker_keys(holdings or [])
+    recommendation_pool = [
+        item for item in watchlist
+        if not item.error and storage.normalize(item.ticker) not in held_tickers
+    ]
     return sorted(
         recommendation_pool,
         key=lambda item: (item.composite_score, item.timing_score, item.quant_score),
@@ -1363,6 +1408,11 @@ def record_recommendation_history(
             target_1 = levels[0].price if len(levels) >= 1 else item.target_price
             target_2 = levels[1].price if len(levels) >= 2 else item.target_price
             target_final = levels[2].price if len(levels) >= 3 else item.target_price
+            price = item.current_price
+            ma5 = item.metrics.get("ma5") or price
+            entry_low = min(price * 0.985, ma5 * 0.995) if price and ma5 else None
+            entry_high = price * (1.015 if item.timing_score >= 70 else 1.0) if price else None
+            entry_reference_price = (entry_low + entry_high) / 2 if entry_low and entry_high else price
             confidence_score = item.target_analysis.confidence_score or item.target_analysis.condition_score or item.composite_score
             matched_theme_count = sum(1 for theme in item.themes if normalize_text(theme) in strong_theme_keys)
             theme_strength = clamp((matched_theme_count * 35) + (10 if item.themes else 0) + (confidence_score * 0.35))
@@ -1372,7 +1422,12 @@ def record_recommendation_history(
                     "date": f"{now:%Y-%m-%d %H:%M:%S} KST",
                     "name": item.name,
                     "ticker": item.ticker,
+                    "market": infer_stock_market(item.ticker),
                     "price": item.current_price,
+                    "entry_low": entry_low,
+                    "entry_high": entry_high,
+                    "entry_reference_price": entry_reference_price,
+                    "entry_zone": item.entry_zone,
                     "action": item.final_action,
                     "quant_score": item.quant_score,
                     "timing_score": item.timing_score,
@@ -1392,6 +1447,7 @@ def record_recommendation_history(
                     "hit_stop_loss": False,
                     "prediction_result": "PENDING",
                     "themes": item.themes,
+                    "subthemes": item.subthemes,
                     "memo": "daily_report_top3",
                 }
             )
@@ -1408,6 +1464,7 @@ def record_recommendation_history(
 
 def build_daily_reports(logger: Logger = None, record_recommendations: bool = False) -> list[str]:
     log(logger, "리포트 생성 시작")
+    storage.auto_patch_themes_from_universe(logger=logger)
     context = build_context(logger=logger)
     log(logger, f"시장 상태 판단 완료: {context.market.state}")
     log(logger, f"강한 테마 선정 완료: {', '.join(context.strong_themes[:3])}")
@@ -1417,17 +1474,19 @@ def build_daily_reports(logger: Logger = None, record_recommendations: bool = Fa
     holding_analyses = analyze_holdings(context)
     holding_errors = [item for item in holding_analyses.values() if item.error]
     log(logger, f"보유종목 분석 완료: 성공 {len(holding_analyses) - len(holding_errors)}개, 오류 {len(holding_errors)}개")
+    recommendations = select_top_recommendations(watchlist, context.holdings)
     reports = build_daily_report_messages(
         market=context.market,
         strong_themes=context.strong_themes,
         watchlist=watchlist,
         holdings=context.holdings,
         holding_analyses=holding_analyses,
+        recommendations=recommendations,
     )
     if record_recommendations:
         record_recommendation_history(
             context.market,
-            select_top_recommendations(watchlist),
+            recommendations,
             context.strong_themes,
             logger=logger,
         )

@@ -11,6 +11,9 @@ import theme_universe
 from config import KST
 
 
+theme_universe.patch_analyzer_theme_universe()
+
+
 def command_log(message: str) -> None:
     print(f"[stock-question-bot] {message}", flush=True)
 

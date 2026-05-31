@@ -164,7 +164,7 @@ async def stock_deep_analysis_command(interaction: discord.Interaction, 종목�
     await respond(interaction, stock_research.stock_deep_detail_report, 종목명)
 
 
-@client.tree.command(name="강한테마종목", description="오늘 강한 테마 기준 추천종목 3개 이름만 보여줍니다.")
+@client.tree.command(name="강한테마종목", description="theme_universe 기반 강한테마 추천 TOP3를 보여줍니다.")
 async def strong_theme_stocks_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.strong_theme_stocks)
 
@@ -297,7 +297,7 @@ async def today_strategy_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.today_strategy)
 
 
-@client.tree.command(name="강한테마", description="뉴스봇 기반 오늘 강한 테마를 보여줍니다.")
+@client.tree.command(name="강한테마", description="뉴스와 theme_universe 메타 기반 오늘 강한 테마를 보여줍니다.")
 async def strong_themes_command(interaction: discord.Interaction) -> None:
     await respond(interaction, bot_commands.strong_themes)
 
