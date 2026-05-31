@@ -27,6 +27,7 @@ _ORIGINAL_STRONG_THEMES_REPORT: Callable[[], str] | None = None
 _ORIGINAL_THEME_CHECK_REPORT: Callable[[str], str] | None = None
 _LAST_RECOMMENDATION_CANDIDATES: list[Any] = []
 _LAST_RECOMMENDATION_META_BY_TICKER: dict[str, dict[str, Any]] = {}
+_LAST_RECOMMENDATION_THEME_SCORES: dict[str, dict[str, Any]] = {}
 _LAST_SHEET_SYNC_ATTEMPT = 0.0
 SHEET_SYNC_MIN_INTERVAL_SECONDS = 60.0
 PRIORITY_WEIGHTS = {"S": 5, "A": 4, "B": 2, "C": 1}
@@ -205,6 +206,81 @@ def _score_volume_component(avg_volume_ratio: float | None) -> int:
     return analyzer.clamp(((avg_volume_ratio - 0.8) / 1.7) * 20, 0, 20)
 
 
+def _score_subtheme_return(avg_return: float | None) -> int:
+    if avg_return is None:
+        return 0
+    return analyzer.clamp(((avg_return + 3.0) / 10.0) * 35, 0, 35)
+
+
+def _score_subtheme_volume(avg_volume_ratio: float | None) -> int:
+    if avg_volume_ratio is None:
+        return 0
+    return analyzer.clamp(((avg_volume_ratio - 0.8) / 1.7) * 30, 0, 30)
+
+
+def _score_subtheme_groups(
+    theme_rows: list[dict[str, Any]],
+    analyses_by_ticker: dict[str, Any],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    seen: dict[str, set[str]] = defaultdict(set)
+    for row in theme_rows:
+        ticker_key = analyzer.normalize_text(str(row.get("ticker", "")))
+        if not ticker_key:
+            continue
+        for subtheme in analyzer.split_theme_values(row.get("subthemes")):
+            if not subtheme or ticker_key in seen[subtheme]:
+                continue
+            groups[subtheme].append(row)
+            seen[subtheme].add(ticker_key)
+
+    scored: list[dict[str, Any]] = []
+    for subtheme, rows in groups.items():
+        valid = [
+            analyses_by_ticker.get(analyzer.normalize_text(str(row.get("ticker", ""))))
+            for row in rows
+        ]
+        valid = [item for item in valid if item is not None and not getattr(item, "error", None)]
+        change_values = [float(item.change_pct) for item in valid if item.change_pct is not None]
+        volume_values = [float(item.metrics.get("volume_ratio", 0.0) or 0.0) for item in valid if item.metrics]
+        avg_return = _avg(change_values) if change_values else None
+        avg_volume_ratio = _avg(volume_values) if volume_values else None
+        representative_score = 10 if any(_is_representative(row) for row in rows) else 0
+        direct_score = 10 if any(_is_direct_benefit(row) for row in rows) else 0
+        priority_score = analyzer.clamp(max((_priority_weight(row.get("priority")) for row in rows), default=0) * 2, 0, 10)
+        breadth_score = analyzer.clamp(len(rows), 0, 5)
+        score = analyzer.clamp(
+            _score_subtheme_return(avg_return)
+            + _score_subtheme_volume(avg_volume_ratio)
+            + representative_score
+            + direct_score
+            + priority_score
+            + breadth_score
+        )
+        leaders = sorted(
+            valid,
+            key=lambda item: (
+                item.change_pct if item.change_pct is not None else -999,
+                item.metrics.get("volume_ratio", 0.0) if item.metrics else 0.0,
+                item.composite_score,
+            ),
+            reverse=True,
+        )[:3]
+        scored.append(
+            {
+                "subtheme": subtheme,
+                "score": score,
+                "rows": rows,
+                "leaders": leaders,
+                "avg_return": avg_return,
+                "avg_volume_ratio": avg_volume_ratio,
+                "total_count": len(rows),
+                "data_points": len(valid),
+            }
+        )
+    return sorted(scored, key=lambda item: (item["score"], item["data_points"], item["total_count"]), reverse=True)
+
+
 def score_theme_groups(context: Any, rows: list[dict[str, Any]] | None = None, logger: Logger = None) -> list[dict[str, Any]]:
     universe_rows = rows if rows is not None else load_theme_universe_rows(logger=logger)
     groups = group_theme_universe_by_theme(universe_rows)
@@ -221,6 +297,11 @@ def score_theme_groups(context: Any, rows: list[dict[str, Any]] | None = None, l
             _analysis_for_item(row, base_strong_themes, context.market.state, analysis_cache)
             for row in theme_rows
         ]
+        analyses_by_ticker = {
+            analyzer.normalize_text(str(item.ticker)): item
+            for item in analyses
+            if str(getattr(item, "ticker", "")).strip()
+        }
         valid = [item for item in analyses if not getattr(item, "error", None)]
         change_values = [float(item.change_pct) for item in valid if item.change_pct is not None]
         volume_values = [float(item.metrics.get("volume_ratio", 0.0) or 0.0) for item in valid if item.metrics]
@@ -288,6 +369,7 @@ def score_theme_groups(context: Any, rows: list[dict[str, Any]] | None = None, l
                 "market_mix": _market_mix(theme_rows),
                 "rows": theme_rows,
                 "leaders": leaders,
+                "subthemes": _score_subtheme_groups(theme_rows, analyses_by_ticker),
                 "evidence": evidence,
                 "components": {
                     "mention": mention_score,
@@ -327,11 +409,60 @@ def _holding_tickers(items: list[dict[str, Any]]) -> set[str]:
     return {analyzer.normalize_text(str(item.get("ticker", ""))) for item in items if str(item.get("ticker", "")).strip()}
 
 
+def _theme_score_index(theme_scores: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {str(item.get("theme", "")): item for item in theme_scores if str(item.get("theme", "")).strip()}
+
+
+def _best_theme_for_stock(stock: dict[str, Any], theme_scores: dict[str, dict[str, Any]], theme_config: dict[str, Any]) -> str:
+    universe_theme = str(stock.get("universe_theme", "") or "")
+    if universe_theme in theme_scores:
+        return universe_theme
+
+    stock_themes = analyzer.split_theme_values(stock.get("themes"))
+    for stock_theme in stock_themes:
+        stock_norm = analyzer.normalize_text(stock_theme)
+        stock_canonical_norm = analyzer.normalize_text(analyzer.canonical_theme(stock_theme, theme_config))
+        for theme in theme_scores:
+            theme_norm = analyzer.normalize_text(theme)
+            theme_canonical_norm = analyzer.normalize_text(analyzer.canonical_theme(theme, theme_config))
+            if stock_norm == theme_norm or stock_canonical_norm == theme_canonical_norm:
+                return theme
+
+    for stock_theme in stock_themes:
+        for theme in theme_scores:
+            if _theme_matches(stock_theme, theme, theme_config):
+                return theme
+    return next(iter(theme_scores), "")
+
+
+def _best_subtheme_score_for_stock(stock: dict[str, Any], theme_info: dict[str, Any] | None) -> tuple[int, str]:
+    if not theme_info:
+        return 0, ""
+    stock_subthemes = analyzer.split_theme_values(stock.get("subthemes"))
+    if not stock_subthemes:
+        return 0, ""
+    scored_subthemes = theme_info.get("subthemes", [])
+    best_score = 0
+    best_name = ""
+    for stock_subtheme in stock_subthemes:
+        stock_norm = analyzer.normalize_text(stock_subtheme)
+        for item in scored_subthemes:
+            subtheme = str(item.get("subtheme", ""))
+            subtheme_norm = analyzer.normalize_text(subtheme)
+            if stock_norm == subtheme_norm or stock_norm in subtheme_norm or subtheme_norm in stock_norm:
+                score = int(item.get("score", 0) or 0)
+                if score > best_score:
+                    best_score = score
+                    best_name = subtheme
+    return best_score, best_name
+
+
 def _stock_candidate_score(
     analysis: Any,
     theme_score: int,
     meta: dict[str, Any],
     *,
+    subtheme_score: int = 0,
     in_watchlist: bool = False,
 ) -> tuple[int, list[str]]:
     change_score = _score_return_component(analysis.change_pct)
@@ -341,7 +472,8 @@ def _stock_candidate_score(
     priority_score = _priority_weight(meta.get("priority"))
     watchlist_score = 5 if in_watchlist else 0
     total = analyzer.clamp(
-        theme_score * 0.35
+        theme_score * 0.25
+        + subtheme_score * 0.20
         + change_score
         + volume_score
         + role_score
@@ -477,8 +609,6 @@ def _theme_universe_stock_item(
 
     if universe_theme not in themes:
         themes.append(universe_theme)
-    if universe_theme not in subthemes:
-        subthemes.append(universe_theme)
 
     return {
         "name": name,
@@ -491,6 +621,7 @@ def _theme_universe_stock_item(
         "priority": str(row.get("priority", "")),
         "status": str(row.get("status", "active") or "active"),
         "memo": str(row.get("memo", "")),
+        "universe_theme": universe_theme,
         "source": f"theme_universe:{universe_theme}",
     }
 
@@ -544,9 +675,13 @@ def dedupe_candidate_items(pools: list[list[dict[str, Any]]], limit: int) -> lis
 
 def build_recommendation_candidate_items(context: Any, logger: Logger = None) -> list[dict[str, Any]]:
     global _LAST_RECOMMENDATION_META_BY_TICKER
+    global _LAST_RECOMMENDATION_THEME_SCORES
     universe_rows = load_theme_universe_rows(logger=logger)
     _LAST_RECOMMENDATION_META_BY_TICKER = _stock_meta_by_ticker(universe_rows)
-    universe_items = theme_universe_candidate_items(context.strong_themes, context.theme_config, logger=logger)
+    scored_themes = score_theme_groups(context, rows=universe_rows, logger=logger)
+    _LAST_RECOMMENDATION_THEME_SCORES = _theme_score_index(scored_themes)
+    major_themes = [str(item["theme"]) for item in scored_themes[:3]]
+    universe_items = theme_universe_candidate_items(major_themes or context.strong_themes, context.theme_config, logger=logger)
     candidates = dedupe_candidate_items(
         [context.holdings, context.watchlist_items, universe_items],
         recommendation_candidate_limit(context.theme_config),
@@ -589,11 +724,22 @@ def select_top_recommendations_with_theme_universe(
         if item.error or ticker_key in held_tickers:
             continue
         matched_meta = _LAST_RECOMMENDATION_META_BY_TICKER.get(ticker_key, {})
-        item_theme_score = strong_theme_score
+        matched_theme = _best_theme_for_stock(
+            {"themes": item.themes, "subthemes": item.subthemes},
+            _LAST_RECOMMENDATION_THEME_SCORES,
+            storage.load_theme_config(),
+        )
+        matched_theme_info = _LAST_RECOMMENDATION_THEME_SCORES.get(matched_theme, {})
+        subtheme_score, _ = _best_subtheme_score_for_stock(
+            {"subthemes": item.subthemes},
+            matched_theme_info,
+        )
+        item_theme_score = int(matched_theme_info.get("score", strong_theme_score) or strong_theme_score)
         score, cautions = _stock_candidate_score(
             item,
             item_theme_score,
             matched_meta,
+            subtheme_score=subtheme_score,
             in_watchlist=ticker_key in watchlist_tickers,
         )
         if score < 35 and len(ranked) >= 3:
@@ -633,7 +779,7 @@ def strong_theme_stock_names() -> str:
     watchlist_tickers = _watchlist_tickers(context.watchlist_items)
     holding_tickers = _holding_tickers(context.holdings)
     meta_by_ticker = _stock_meta_by_ticker(rows)
-    theme_score_by_name = {str(item["theme"]): int(item["score"]) for item in theme_scores}
+    theme_score_by_name = _theme_score_index(theme_scores)
 
     if not candidate_items:
         return _ORIGINAL_STRONG_THEME_NAMES()
@@ -646,23 +792,28 @@ def strong_theme_stock_names() -> str:
         analysis = analyzer.analyze_stock(stock, strong_themes, context.market.state)
         if analysis.error:
             continue
-        matched_theme = next((theme for theme in stock.get("themes", []) if theme in theme_score_by_name), strong_themes[0] if strong_themes else "-")
+        matched_theme = _best_theme_for_stock(stock, theme_score_by_name, context.theme_config)
+        matched_theme_info = theme_score_by_name.get(matched_theme, {})
+        subtheme_score, matched_subtheme = _best_subtheme_score_for_stock(stock, matched_theme_info)
         meta = meta_by_ticker.get(ticker_key, stock)
         score, cautions = _stock_candidate_score(
             analysis,
-            theme_score_by_name.get(matched_theme, 50),
+            int(matched_theme_info.get("score", 50) or 50),
             meta,
+            subtheme_score=subtheme_score,
             in_watchlist=ticker_key in watchlist_tickers,
         )
-        ranked.append((score, analysis, meta, cautions, matched_theme))
+        ranked.append((score, analysis, meta, cautions, matched_theme, matched_subtheme, subtheme_score))
 
     ranked = sorted(ranked, key=lambda item: (item[0], item[1].composite_score), reverse=True)[:3]
     lines = ["강한테마종목 TOP3:", ""]
-    for index, (score, item, meta, cautions, matched_theme) in enumerate(ranked, start=1):
+    for index, (score, item, meta, cautions, matched_theme, matched_subtheme, subtheme_score) in enumerate(ranked, start=1):
         lines.append(f"{index}. {analyzer.bold(item.name)}")
         lines.append(f"티커: {analyzer.bold(item.ticker)}")
         lines.append(f"시장: {analyzer.bold(_market_for_ticker(item.ticker, meta))}")
-        lines.append(f"테마: {analyzer.bold(matched_theme)}")
+        lines.append(f"대테마: {analyzer.bold(matched_theme or '-')}")
+        if matched_subtheme:
+            lines.append(f"소테마: {analyzer.bold(f'{matched_subtheme} ({subtheme_score})')}")
         lines.append(f"점수: {analyzer.bold(str(score))}")
         if cautions:
             lines.append(f"주의: {', '.join(cautions)}")
@@ -672,7 +823,7 @@ def strong_theme_stock_names() -> str:
     lines.extend(
         [
             "기준:",
-            analyzer.bold("테마 점수 + 상승률 + 거래량 + role/benefit/priority + 관심종목 가산점"),
+            analyzer.bold("대테마 점수 + 소테마 점수 + 상승률 + 거래량 + role/benefit/priority + 관심종목 가산점"),
             "",
             "데이터 출처:",
             f"* {analyzer.bold('theme_universe 기반')}",
@@ -693,14 +844,31 @@ def strong_themes_report() -> str:
     lines = analyzer.section("🔥 오늘 강한 테마")
     for index, item in enumerate(scored, start=1):
         leaders = item.get("leaders", [])
-        leader_text = ", ".join(str(leader.ticker) for leader in leaders[:3]) if leaders else "데이터 부족"
-        evidence = item.get("evidence", [])[:4]
-        evidence_text = " / ".join(evidence) if evidence else "데이터 부족"
+        leader_text = "\n".join(str(leader.ticker) for leader in leaders[:4]) if leaders else "데이터 부족"
+        subthemes = item.get("subthemes", [])[:3]
         lines.append(f"{index}. {analyzer.bold(item['theme'])}")
         lines.append(f"점수: {analyzer.bold(str(item['score']))}")
         lines.append(f"시장: {analyzer.bold(item['market_mix'])}")
-        lines.append(f"대표 강세종목: {analyzer.bold(leader_text)}")
-        lines.append(f"근거: {evidence_text}")
+        lines.append("")
+        lines.append("강한 소테마:")
+        if subthemes:
+            for subtheme in subthemes:
+                lines.append(f"- {subtheme['subtheme']} ({subtheme['score']})")
+        else:
+            lines.append("- 데이터 부족")
+        lines.append("")
+        lines.append("대표 강세종목:")
+        lines.append(leader_text)
+        lines.append("")
+        lines.append("근거:")
+        if item.get("avg_return") is not None:
+            lines.append(f"평균 상승률 {analyzer.format_pct(item['avg_return'])}")
+        else:
+            lines.append("평균 상승률 데이터 부족")
+        if item.get("avg_volume_ratio") is not None:
+            lines.append(f"거래량 {item['avg_volume_ratio']:.1f}배")
+        else:
+            lines.append("거래량 데이터 부족")
         if int(item.get("data_points", 0)) == 0:
             lines.append("주의: 데이터 부족")
         lines.append("")
@@ -726,7 +894,13 @@ def theme_check_report(theme: str) -> str:
     theme_rows = groups[matched_theme]
     analysis_cache: dict[str, Any] = {}
     analyses = [_analysis_for_item(row, [matched_theme], context.market.state, analysis_cache) for row in theme_rows]
+    analyses_by_ticker = {
+        analyzer.normalize_text(str(item.ticker)): item
+        for item in analyses
+        if str(getattr(item, "ticker", "")).strip()
+    }
     valid = [item for item in analyses if not item.error]
+    strong_subthemes = _score_subtheme_groups(theme_rows, analyses_by_ticker)
     recent_strong = sorted(
         valid,
         key=lambda item: (
@@ -743,12 +917,24 @@ def theme_check_report(theme: str) -> str:
     overheated = avg_rsi >= 70 or any((item.change_pct or 0) >= 8 for item in valid)
 
     lines = analyzer.section("🧭 테마점검")
-    lines.append(f"테마명: {analyzer.bold(matched_theme)}")
-    lines.append(f"총 종목 수: {analyzer.bold(str(len(theme_rows)))}")
+    lines.append("대테마:")
+    lines.append(analyzer.bold(matched_theme))
     lines.append("")
-    lines.append("시장별 분포:")
+    lines.append("종목수:")
+    lines.append(analyzer.bold(str(len(theme_rows))))
+    lines.append("")
+    lines.append("시장분포:")
     for market, count in market_counts.items():
-        lines.append(f"* {market}: {analyzer.bold(str(count))}")
+        lines.append(f"{market} {count}")
+    lines.append("")
+    lines.append("강한 소테마:")
+    if strong_subthemes:
+        for index, item in enumerate(strong_subthemes[:5], start=1):
+            leaders_text = ", ".join(str(leader.ticker) for leader in item.get("leaders", [])[:2])
+            suffix = f" / 대표 {leaders_text}" if leaders_text else ""
+            lines.append(f"{index}. {item['subtheme']} ({item['score']}){suffix}")
+    else:
+        lines.append("데이터 부족")
     lines.append("")
     lines.append("대표종목:")
     lines.append(", ".join(f"{row.get('name') or row.get('ticker')}({row.get('ticker')})" for row in representatives[:6]) or "데이터 부족")
