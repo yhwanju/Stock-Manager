@@ -6,6 +6,7 @@ from typing import Any
 
 import analyzer
 import google_sheets_store
+import market_group_output
 import storage
 import theme_universe
 from config import KST
@@ -1059,10 +1060,8 @@ def delete_holding(query: str) -> str:
 
 
 def list_holdings() -> str:
-    storage.prune_watchlist_holdings_overlap(logger=command_log)
-    items = storage.load_holdings(logger=command_log)
-    command_log(f"/보유목록 holdings 읽음: {len(items)}개 / 저장소: {storage.storage_location_text(storage.HOLDINGS_FILE)}")
-    return analyzer.holdings_text(items=items, logger=command_log)
+    command_log("/보유목록 출력 경로: market_group_output.holdings_text")
+    return market_group_output.holdings_text(logger=command_log)
 
 
 def portfolio_check() -> str:
