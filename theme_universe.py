@@ -19,6 +19,7 @@ _PATCHED = False
 _ORIGINAL_EXTRACT_PRIORITY: Callable[..., list[str]] | None = None
 _ORIGINAL_EXTRACT_THEMES: Callable[[dict[str, Any]], tuple[list[str], str]] | None = None
 _ORIGINAL_ANALYZE_WATCHLIST: Callable[[Any], list[Any]] | None = None
+_ORIGINAL_BUILD_CONTEXT: Callable[..., Any] | None = None
 _ORIGINAL_SELECT_TOP: Callable[[list[Any]], list[Any]] | None = None
 _ORIGINAL_DEEP_CANDIDATES: Callable[..., list[dict[str, Any]]] | None = None
 _ORIGINAL_CONDITION_CANDIDATES: Callable[..., list[dict[str, Any]]] | None = None
@@ -636,7 +637,7 @@ def _best_theme_for_stock(stock: dict[str, Any], theme_scores: dict[str, dict[st
         for theme in theme_scores:
             if _theme_matches(stock_theme, theme, theme_config):
                 return theme
-    return next(iter(theme_scores), "")
+    return ""
 
 
 def _best_subtheme_score_for_stock(stock: dict[str, Any], theme_info: dict[str, Any] | None) -> tuple[int, str]:
@@ -893,7 +894,7 @@ def build_recommendation_candidate_items(context: Any, logger: Logger = None) ->
     major_themes = [str(item["theme"]) for item in scored_themes[:3]]
     universe_items = theme_universe_candidate_items(major_themes or context.strong_themes, context.theme_config, logger=logger)
     candidates = dedupe_candidate_items(
-        [context.holdings, context.watchlist_items, universe_items],
+        [context.watchlist_items, universe_items],
         recommendation_candidate_limit(context.theme_config),
     )
     _emit_log(
@@ -920,6 +921,22 @@ def analyze_watchlist_with_theme_universe(context: Any) -> list[Any]:
     return watchlist_analyses
 
 
+def build_context_with_theme_universe(*args: Any, **kwargs: Any) -> Any:
+    if _ORIGINAL_BUILD_CONTEXT is None:
+        raise RuntimeError("original build_context is not available")
+    context = _ORIGINAL_BUILD_CONTEXT(*args, **kwargs)
+    try:
+        rows = load_theme_universe_rows()
+        theme_scores, _warnings = validate_strong_theme_output(score_theme_groups(context, rows=rows))
+        scored_themes = [str(item.get("theme", "")) for item in theme_scores[:3] if str(item.get("theme", "")).strip()]
+        if scored_themes:
+            context.strong_themes = scored_themes
+            context.theme_note = "theme_universe 점수 TOP3를 반영했습니다."
+    except Exception as exc:
+        _emit_log(None, f"[theme-universe] build_context strong theme patch skipped: {exc}")
+    return context
+
+
 def select_top_recommendations_with_theme_universe(
     watchlist: list[Any],
     holdings: list[dict[str, Any]] | None = None,
@@ -939,6 +956,8 @@ def select_top_recommendations_with_theme_universe(
             _LAST_RECOMMENDATION_THEME_SCORES,
             storage.load_theme_config(),
         )
+        if not matched_theme:
+            continue
         matched_theme_info = _LAST_RECOMMENDATION_THEME_SCORES.get(matched_theme, {})
         subtheme_score, _ = _best_subtheme_score_for_stock(
             {"subthemes": item.subthemes},
@@ -1232,6 +1251,7 @@ def universe_summary_text(logger: Logger = None) -> str:
 def patch_analyzer_theme_universe() -> None:
     global _PATCHED
     global _ORIGINAL_ANALYZE_WATCHLIST
+    global _ORIGINAL_BUILD_CONTEXT
     global _ORIGINAL_CONDITION_CANDIDATES
     global _ORIGINAL_DEEP_CANDIDATES
     global _ORIGINAL_EXTRACT_PRIORITY
@@ -1249,6 +1269,7 @@ def patch_analyzer_theme_universe() -> None:
     _ORIGINAL_EXTRACT_PRIORITY = analyzer.extract_priority_theme_payload
     _ORIGINAL_EXTRACT_THEMES = analyzer.extract_themes_from_news
     _ORIGINAL_ANALYZE_WATCHLIST = analyzer.analyze_watchlist
+    _ORIGINAL_BUILD_CONTEXT = analyzer.build_context
     _ORIGINAL_SELECT_TOP = analyzer.select_top_recommendations
     _ORIGINAL_DEEP_CANDIDATES = analyzer.build_deep_analysis_candidates
     _ORIGINAL_CONDITION_CANDIDATES = analyzer.build_condition_search_candidates
@@ -1259,6 +1280,7 @@ def patch_analyzer_theme_universe() -> None:
     analyzer.extract_priority_theme_payload = extract_priority_theme_payload
     analyzer.extract_themes_from_news = extract_themes_from_news
     analyzer.analyze_watchlist = analyze_watchlist_with_theme_universe
+    analyzer.build_context = build_context_with_theme_universe
     analyzer.select_top_recommendations = select_top_recommendations_with_theme_universe
     analyzer.build_deep_analysis_candidates = build_deep_analysis_candidates
     analyzer.build_condition_search_candidates = build_condition_search_candidates

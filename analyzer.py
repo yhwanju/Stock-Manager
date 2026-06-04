@@ -287,6 +287,142 @@ def stock_matches_theme(stock: dict[str, Any] | StockAnalysis, theme: str, theme
     return any(canonical_theme(label, config) == target or normalize_text(label) == normalize_text(theme) for label in labels)
 
 
+def theme_match_detail(
+    stock: dict[str, Any] | StockAnalysis,
+    strong_themes: list[str],
+    theme_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    config = theme_config or storage.load_theme_config()
+    if isinstance(stock, StockAnalysis):
+        themes = stock.themes
+        subthemes = stock.subthemes
+        non_priority: list[str] = []
+        name = stock.name
+        ticker = stock.ticker
+    else:
+        themes, subthemes, non_priority = normalize_stock_theme_fields(stock, config)
+        name = str(stock.get("name", "-"))
+        ticker = str(stock.get("ticker", ""))
+
+    labels = [*themes, *subthemes, *non_priority]
+    if not labels or not strong_themes:
+        return {
+            "name": name,
+            "ticker": ticker,
+            "themes": themes,
+            "subthemes": subthemes,
+            "matched_theme": "",
+            "match_strength": "없음",
+            "strength_score": 0,
+            "reason": "오늘 강한테마 TOP3와 직접 연결되는 테마가 없습니다.",
+        }
+
+    best: dict[str, Any] | None = None
+    for rank, strong_theme in enumerate(strong_themes[:3], start=1):
+        strong_canonical = canonical_theme(strong_theme, config)
+        strong_norm = normalize_text(strong_theme)
+        strong_canonical_norm = normalize_text(strong_canonical)
+
+        score = 0
+        matched_by = ""
+        for theme in themes:
+            theme_canonical = canonical_theme(theme, config)
+            if normalize_text(theme) == strong_norm or normalize_text(theme_canonical) == strong_canonical_norm:
+                score = max(score, 95 - rank * 5)
+                matched_by = theme
+            elif strong_norm in normalize_text(theme) or normalize_text(theme) in strong_norm:
+                score = max(score, 72 - rank * 5)
+                matched_by = theme
+
+        for subtheme in subthemes:
+            subtheme_canonical = canonical_theme(subtheme, config)
+            if normalize_text(subtheme) == strong_norm:
+                score = max(score, 78 - rank * 5)
+                matched_by = subtheme
+            elif normalize_text(subtheme_canonical) == strong_canonical_norm:
+                score = max(score, 66 - rank * 5)
+                matched_by = subtheme
+            elif strong_norm in normalize_text(subtheme) or normalize_text(subtheme) in strong_norm:
+                score = max(score, 54 - rank * 5)
+                matched_by = subtheme
+
+        for label in non_priority:
+            if normalize_text(label) == strong_norm or normalize_text(canonical_theme(label, config)) == strong_canonical_norm:
+                score = max(score, 45 - rank * 4)
+                matched_by = label
+
+        if score and (best is None or score > int(best["strength_score"])):
+            best = {
+                "matched_theme": strong_theme,
+                "matched_by": matched_by,
+                "strength_score": score,
+            }
+
+    if not best:
+        return {
+            "name": name,
+            "ticker": ticker,
+            "themes": themes,
+            "subthemes": subthemes,
+            "matched_theme": "",
+            "match_strength": "없음",
+            "strength_score": 0,
+            "reason": "오늘 강한테마 TOP3와 직접 연결되는 테마가 없습니다.",
+        }
+
+    score = int(best["strength_score"])
+    strength = "강함" if score >= 80 else "보통" if score >= 60 else "약함"
+    matched_by = str(best.get("matched_by", ""))
+    reason = f"{matched_by} 태그가 오늘 강한테마 {best['matched_theme']}와 연결됩니다." if matched_by else f"오늘 강한테마 {best['matched_theme']}와 연결됩니다."
+    return {
+        "name": name,
+        "ticker": ticker,
+        "themes": themes,
+        "subthemes": subthemes,
+        "matched_theme": best["matched_theme"],
+        "matched_by": matched_by,
+        "match_strength": strength,
+        "strength_score": score,
+        "reason": reason,
+    }
+
+
+def match_portfolio_with_strong_themes(
+    holdings: list[dict[str, Any]],
+    watchlist: list[dict[str, Any]],
+    strong_themes: list[str],
+    theme_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    config = theme_config or storage.load_theme_config()
+
+    def enrich(item: dict[str, Any]) -> dict[str, Any]:
+        return {"item": item, "match": theme_match_detail(item, strong_themes, config)}
+
+    holding_rows = [enrich(item) for item in holdings]
+    watchlist_rows = [enrich(item) for item in watchlist]
+    matched_holdings = [row for row in holding_rows if row["match"]["match_strength"] != "없음"]
+    matched_watchlist = [row for row in watchlist_rows if row["match"]["match_strength"] != "없음"]
+    unmatched_holdings = [row for row in holding_rows if row["match"]["match_strength"] == "없음"]
+
+    exposure_counts: dict[str, int] = {}
+    exposure_names: dict[str, list[str]] = {}
+    for row in matched_holdings:
+        theme = str(row["match"].get("matched_theme") or "미분류")
+        exposure_counts[theme] = exposure_counts.get(theme, 0) + 1
+        exposure_names.setdefault(theme, []).append(str(row["item"].get("name", "-")))
+
+    top_theme_exposure = [
+        {"theme": theme, "count": count, "holdings": exposure_names.get(theme, [])}
+        for theme, count in sorted(exposure_counts.items(), key=lambda pair: pair[1], reverse=True)
+    ]
+    return {
+        "matched_holdings": matched_holdings,
+        "matched_watchlist": matched_watchlist,
+        "unmatched_holdings": unmatched_holdings,
+        "top_theme_exposure": top_theme_exposure,
+    }
+
+
 def theme_representatives(theme_config: dict[str, Any] | None = None, themes: list[str] | None = None) -> list[dict[str, Any]]:
     config = theme_config or storage.load_theme_config()
     selected = themes or priority_theme_names(config)
@@ -1117,6 +1253,88 @@ def holding_action(analysis: StockAnalysis, quantity: int, average_price: float,
     return action, stop_price, target_price
 
 
+def holding_action_reason(
+    action: str,
+    analysis: StockAnalysis,
+    profit_pct: float | None,
+    match: dict[str, Any],
+    market_state: str,
+) -> str:
+    strength = str(match.get("match_strength", "없음"))
+    matched_theme = str(match.get("matched_theme", ""))
+    profit_positive = profit_pct is not None and profit_pct > 0
+    profit_weak = profit_pct is not None and profit_pct <= -5
+
+    if action == "데이터 오류":
+        return "시세 데이터 확인 전에는 판단 근거가 부족해 신규 대응을 보류합니다."
+    if action == "손절주의":
+        return "손실 폭 또는 기술적 이탈 위험이 커져 손절 기준을 먼저 확인해야 합니다."
+    if action == "비중축소":
+        return "시장 흐름이 약하고 손익이 불리해 반등 시 비중 조절이 우선입니다."
+    if action == "일부익절":
+        return "수익 구간이 커져 전량 추격보다 일부 이익 실현과 잔여 보유가 균형적입니다."
+    if strength == "강함":
+        return f"오늘 강한테마 {matched_theme}와 직접 연결되어 보유 근거가 유지됩니다."
+    if strength == "보통":
+        return f"{matched_theme}와 연결성은 있지만 주도주 여부 확인이 필요해 보유 중심이 적절합니다."
+    if strength == "약함":
+        if profit_positive:
+            return f"수익권이지만 오늘 강한테마 {matched_theme}와의 연결은 약해 추가매수보다 보유 관점입니다."
+        return f"{matched_theme}와 간접 연결만 있어 신규 추가매수 근거는 아직 약합니다."
+    if profit_positive:
+        return "수익권이나 오늘 강한테마 TOP3와 직접 연결은 약해 기존 수익 관리가 우선입니다."
+    if profit_weak:
+        return "현재 강한테마와 연결성이 낮고 손익도 불리해 회복 신호 전까지 리스크 관리가 우선입니다."
+    if market_state == "하락장":
+        return "강한테마 연결성이 낮은 상태에서 시장도 약해 관망과 현금 관리가 우선입니다."
+    return "현재 강한테마와 연결성이 낮아 신규매수 근거는 약하고 기존 포지션 점검이 우선입니다."
+
+
+def holding_observation_points(analysis: StockAnalysis, match: dict[str, Any]) -> str:
+    points: list[str] = []
+    ma20 = analysis.metrics.get("ma20") if analysis.metrics else None
+    volume_ratio = float(analysis.metrics.get("volume_ratio", 0.0) or 0.0) if analysis.metrics else 0.0
+    if ma20:
+        points.append("20일선 유지")
+    if volume_ratio < 1.2:
+        points.append("거래량 재증가 여부")
+    else:
+        points.append("거래량 과열 완화 여부")
+    if match.get("match_strength") in {"약함", "없음"}:
+        points.append("강한테마 재진입 여부")
+    else:
+        points.append(f"{match.get('matched_theme')} 주도 지속 여부")
+    return ", ".join(dict.fromkeys(points))
+
+
+def holding_risk_text(analysis: StockAnalysis, market_state: str, match: dict[str, Any]) -> str:
+    risks = analysis.risk_bullets[:2] if analysis.risk_bullets else []
+    if match.get("match_strength") in {"강함", "보통"}:
+        risks.append(f"{match.get('matched_theme')} 조정 시 변동성 확대 가능")
+    else:
+        risks.append("강한테마 밖 종목으로 수급 우선순위가 밀릴 가능성")
+    if market_state in {"하락장", "변동성 확대장"}:
+        risks.append(f"{market_state}에서는 비중 확대보다 방어 우선")
+    return ", ".join(dict.fromkeys(risks[:3]))
+
+
+def action_reason_for_stock(analysis: StockAnalysis, match: dict[str, Any], in_watchlist: bool = False) -> str:
+    strength = str(match.get("match_strength", "없음"))
+    matched_theme = str(match.get("matched_theme", ""))
+    if analysis.error:
+        return "시세 데이터 오류로 오늘 매매 판단에서 제외합니다."
+    if strength == "없음":
+        return "오늘 강한테마 TOP3와 연결성이 낮아 우선순위를 낮춥니다."
+    if analysis.final_action in {"매수가능", "분할매수", "선별매수", "소액분할매수"}:
+        watch_text = "관심종목 가점까지 있어 " if in_watchlist else ""
+        return f"{watch_text}{matched_theme} 테마와 연결되고 기술 점수가 양호해 신규 후보로 볼 수 있습니다."
+    if analysis.final_action == "눌림대기":
+        return f"{matched_theme} 테마 후보지만 현재 가격은 눌림 확인 후 접근이 낫습니다."
+    if analysis.current_state == "단기 과열":
+        return f"{matched_theme} 테마와 연결되지만 단기 과열이라 추격매수는 피합니다."
+    return f"{matched_theme} 테마와 연결되지만 매수 타이밍 점수 확인이 더 필요합니다."
+
+
 def summarize_holding_action(holdings: list[dict[str, Any]], holding_analyses: dict[str, StockAnalysis], market_state: str) -> str:
     actions: list[str] = []
     for holding in holdings:
@@ -1259,64 +1477,55 @@ def build_daily_report_messages(
     holdings: list[dict[str, Any]],
     holding_analyses: dict[str, StockAnalysis],
     recommendations: list[StockAnalysis] | None = None,
+    context: AnalysisContext | None = None,
 ) -> list[str]:
     now = datetime.now(KST)
+    theme_config = context.theme_config if context else storage.load_theme_config()
+    raw_watchlist = context.watchlist_items if context else [
+        {"name": item.name, "ticker": item.ticker, "themes": item.themes, "subthemes": item.subthemes}
+        for item in watchlist
+    ]
+    theme_matches = match_portfolio_with_strong_themes(holdings, raw_watchlist, strong_themes, theme_config)
     if recommendations is None:
         recommendations = select_top_recommendations(watchlist, holdings)
-    new_entry_action = "관망"
-    if recommendations and recommendations[0].final_action in {"매수가능", "분할매수", "선별매수", "소액분할매수"}:
-        new_entry_action = recommendations[0].final_action
-    holding_summary_action = summarize_holding_action(holdings, holding_analyses, market.state)
 
-    message1: list[str] = []
-    message1.append("📊 **주식관리 리포트**")
-    sent_at_text = f"{now:%Y-%m-%d %H:%M} KST"
-    message1.append(f"발송일: {bold(sent_at_text)}")
-    message1.append("")
-    message1.extend(section("🌎 시장 상태"))
-    message1.append(f"시장 상태: {bold(market.state)}")
-    message1.append(f"현금 비중 권고: {bold(market.cash_recommendation)}")
-    message1.append("")
-    message1.extend(section("⚡ 오늘 액션 요약"))
-    message1.append(f"* 신규진입: {bold(new_entry_action)}")
-    message1.append(f"* 보유종목: {bold(holding_summary_action)}")
-    message1.append(f"* 매매원칙: {bold('추격매수 금지')}")
-    message1.append("")
-    message1.extend(section("🔥 오늘 강한 테마"))
+    watchlist_by_ticker = {normalize_text(item.ticker): item for item in watchlist}
+    watchlist_raw_by_ticker = {
+        normalize_text(str(item.get("ticker", ""))): item
+        for item in raw_watchlist
+        if str(item.get("ticker", "")).strip()
+    }
+    watch_rows: list[tuple[StockAnalysis, dict[str, Any], dict[str, Any]]] = []
+    for item in watchlist:
+        raw = watchlist_raw_by_ticker.get(normalize_text(item.ticker), {"name": item.name, "ticker": item.ticker, "themes": item.themes, "subthemes": item.subthemes})
+        match = theme_match_detail(raw, strong_themes, theme_config)
+        watch_rows.append((item, raw, match))
+    strong_watch = [row for row in watch_rows if row[2]["match_strength"] != "없음" and not row[0].error]
+    pullback_watch = [
+        row for row in watch_rows
+        if row not in strong_watch
+        and not row[0].error
+        and (row[0].final_action in {"눌림대기", "관망"} or abs(float(row[0].metrics.get("price_vs_ma20", 99.0) or 99.0)) <= 5)
+    ]
+    excluded_watch = [row for row in watch_rows if row not in strong_watch and row not in pullback_watch]
+
+    message1: list[str] = [
+        "📊 **주식관리 리포트**",
+        f"발송일: {bold(f'{now:%Y-%m-%d %H:%M} KST')}",
+        "",
+    ]
+
+    message1.extend(section("1) 오늘 강한테마 TOP3"))
     for index, theme in enumerate(strong_themes[:3], start=1):
         message1.append(f"{index}. {bold(theme)}")
+    if not strong_themes:
+        message1.append("강한테마 데이터 없음")
     message1.append("")
-    message1.extend(section("🏆 추천 종목 TOP3"))
-    if recommendations:
-        for item in recommendations:
-            message1.append(f"종목명: {bold(item.name)}")
-            message1.append(f"액션: {bold(item.final_action)}")
-            message1.append("진입 가능 구간:")
-            message1.append(item.entry_zone)
-            message1.append("")
-            append_price_block(message1, "손절가", item.stop_price, item.ticker)
-            append_target_price_summary(message1, item)
-    else:
-        message1.append("추천 가능 종목 없음")
-        message1.append("")
 
-    message1.extend(section("👀 관심종목 점검"))
-    for item in watchlist:
-        message1.append(f"종목명: {bold(item.name)}")
-        message1.append(f"상태: {bold(item.current_state)}")
-        message1.append(f"액션: {bold(item.final_action)}")
-        if item.error:
-            message1.append(f"오류: {item.error}")
-        message1.append("")
-
-    message2: list[str] = []
-    message2.append("💼 **보유종목 관리**")
-    message2.append("")
-    message2.extend(section("💼 보유종목 관리"))
+    message1.extend(section("2) 내 보유종목과의 연결"))
     if not holdings:
-        message2.append("보유종목 없음")
-        message2.append("")
-
+        message1.append("보유종목 없음")
+        message1.append("")
     for holding in holdings:
         ticker = holding["ticker"]
         analysis = holding_analyses[ticker]
@@ -1326,23 +1535,104 @@ def build_daily_report_messages(
         profit_pct = None
         if analysis.current_price:
             profit_pct = ((analysis.current_price / average_price) - 1) * 100
-
-        message2.append(f"종목명: {bold(holding['name'])}")
-        quantity_text = f"{quantity:,}주"
-        message2.append(f"보유수량: {bold(quantity_text)}")
-        message2.append(f"평단: {bold(format_price_for_ticker(average_price, ticker))}")
-        message2.append(f"현재가: {bold(format_price_for_ticker(analysis.current_price, ticker))}")
-        message2.append(f"수익률: {bold(format_pct(profit_pct))}")
-        message2.append(f"액션: {bold(action)}")
-        append_price_block(message2, "손절가", stop_price, ticker)
+        match = theme_match_detail(holding, strong_themes, theme_config)
+        theme_text = " / ".join(stock_theme_labels(holding, theme_config)) or "미분류"
+        match_text = f"{match['matched_theme']} {match['match_strength']}" if match["match_strength"] != "없음" else "없음"
+        message1.append(f"{holding['name']}")
+        message1.append(f"수익률: {bold(format_pct(profit_pct))}")
+        message1.append(f"판단: {bold(action)}")
+        message1.append(f"테마: {bold(theme_text)}")
+        message1.append(f"오늘 강한테마 매칭: {bold(match_text)}")
+        message1.append(f"의견: {holding_action_reason(action, analysis, profit_pct, match, market.state)}")
+        message1.append(f"관찰포인트: {holding_observation_points(analysis, match)}")
+        message1.append(f"리스크: {holding_risk_text(analysis, market.state, match)}")
+        if stop_price:
+            message1.append(f"액션 이유: {action} 기준은 {format_price_for_ticker(stop_price, ticker)} 이탈 여부와 테마 지속성을 함께 확인합니다.")
         if analysis.error:
-            message2.append(f"오류: {analysis.error}")
-            message2.append("")
+            message1.append(f"오류: {analysis.error}")
+        message1.append("")
 
-    message2.extend(section("⚠️ 리스크 경고"))
-    message2.append("* 추격매수 금지")
-    message2.append("* 손절가 이탈 종목 물타기 금지")
-    message2.append("* 시장 변동성 확대 시 비중 축소 검토")
+    message1.extend(section("3) 내 관심종목 중 오늘 볼 종목"))
+    message1.append("강한테마 매칭 종목:")
+    if strong_watch:
+        for item, _raw, match in sorted(strong_watch, key=lambda row: (row[2]["strength_score"], row[0].composite_score), reverse=True)[:5]:
+            message1.append(f"* {item.name}: {bold(match['matched_theme'] + ' ' + match['match_strength'])} / {item.final_action} - {action_reason_for_stock(item, match, True)}")
+    else:
+        message1.append("* 없음")
+    message1.append("")
+    message1.append("눌림 대기 종목:")
+    if pullback_watch:
+        for item, _raw, match in sorted(pullback_watch, key=lambda row: row[0].timing_score, reverse=True)[:5]:
+            match_text = f"{match['matched_theme']} {match['match_strength']}" if match["match_strength"] != "없음" else "테마 매칭 없음"
+            message1.append(f"* {item.name}: {match_text} / {item.current_state} - 눌림 확인 후 접근")
+    else:
+        message1.append("* 없음")
+    message1.append("")
+    message1.append("제외 종목:")
+    if excluded_watch:
+        for item, _raw, match in excluded_watch[:5]:
+            reason = "시세 오류" if item.error else action_reason_for_stock(item, match, True)
+            message1.append(f"* {item.name}: {reason}")
+    else:
+        message1.append("* 없음")
+    message1.append("")
+
+    message1.extend(section("4) 신규 후보 TOP3"))
+    if recommendations:
+        watchlist_keys = {normalize_text(item.ticker) for item in watchlist}
+        for index, item in enumerate(recommendations, start=1):
+            raw = watchlist_raw_by_ticker.get(normalize_text(item.ticker), {"name": item.name, "ticker": item.ticker, "themes": item.themes, "subthemes": item.subthemes})
+            match = theme_match_detail(raw, strong_themes, theme_config)
+            match_text = f"{match['matched_theme']} {match['match_strength']}" if match["match_strength"] != "없음" else "없음"
+            message1.append(f"{index}. {bold(item.name)}")
+            message1.append(f"오늘 강한테마 매칭: {bold(match_text)}")
+            message1.append(f"관심종목 여부: {bold('예' if normalize_text(item.ticker) in watchlist_keys else '아니오')}")
+            message1.append(f"판단: {bold(item.final_action)} - {action_reason_for_stock(item, match, normalize_text(item.ticker) in watchlist_keys)}")
+            message1.append(f"관찰 가격: {bold(item.entry_zone)}")
+            if item.stop_price:
+                message1.append(f"리스크 기준: {format_price_for_ticker(item.stop_price, item.ticker)} 이탈 시 매수 논리 재점검")
+            message1.append("")
+    else:
+        message1.append("추천 가능 종목 없음")
+        message1.append("")
+
+    message1.extend(section("5) 리스크/주의사항"))
+    message1.append(f"* 시장 상태: {bold(market.state)} / 현금 비중 권고 {bold(market.cash_recommendation)}")
+    if theme_matches["top_theme_exposure"]:
+        exposure = ", ".join(f"{row['theme']} {row['count']}개" for row in theme_matches["top_theme_exposure"][:3])
+        message1.append(f"* 보유 테마 노출: {exposure}")
+    else:
+        message1.append("* 보유종목은 오늘 강한테마 TOP3와 직접 연결이 약합니다.")
+    message1.append("* 강한테마 매칭이 약한 종목은 추격매수보다 관찰 가격 확인이 우선입니다.")
+    message1.append("* 손절/비중축소 기준은 가격 이탈과 테마 훼손이 동시에 나타나는지 확인합니다.")
+
+    message2: list[str] = [
+        "💼 **보유종목 요약**",
+        "",
+        *section("💼 보유종목 요약"),
+    ]
+    if not holdings:
+        message2.append("보유종목 없음")
+    for holding in holdings:
+        ticker = holding["ticker"]
+        analysis = holding_analyses[ticker]
+        quantity = int(holding["quantity"])
+        average_price = holding_average_price(holding)
+        action, stop_price, _target_price = holding_action(analysis, quantity, average_price, market.state)
+        profit_pct = ((analysis.current_price / average_price) - 1) * 100 if analysis.current_price and average_price else None
+        match = theme_match_detail(holding, strong_themes, theme_config)
+        match_text = f"{match['matched_theme']} {match['match_strength']}" if match["match_strength"] != "없음" else "없음"
+        message2.append(f"{holding['name']}")
+        message2.append(f"수익률: {bold(format_pct(profit_pct))}")
+        message2.append(f"판단: {bold(action)}")
+        message2.append(f"테마: {bold(' / '.join(stock_theme_labels(holding, theme_config)) or '미분류')}")
+        message2.append(f"오늘 강한테마 매칭: {bold(match_text)}")
+        message2.append(f"의견: {holding_action_reason(action, analysis, profit_pct, match, market.state)}")
+        message2.append(f"관찰포인트: {holding_observation_points(analysis, match)}")
+        message2.append(f"리스크: {holding_risk_text(analysis, market.state, match)}")
+        if stop_price:
+            message2.append(f"액션 이유: {format_price_for_ticker(stop_price, ticker)} 이탈 여부와 테마 지속성을 함께 확인합니다.")
+        message2.append("")
 
     return ["\n".join(message1).strip(), "\n".join(message2).strip()]
 
@@ -1482,6 +1772,7 @@ def build_daily_reports(logger: Logger = None, record_recommendations: bool = Fa
         holdings=context.holdings,
         holding_analyses=holding_analyses,
         recommendations=recommendations,
+        context=context,
     )
     if record_recommendations:
         record_recommendation_history(
@@ -1913,12 +2204,62 @@ def market_status_report() -> str:
 def today_strategy_report() -> str:
     context = build_context()
     lines = section("⚡ 오늘전략")
-    can_buy = "가능" if context.market.state == "상승장" else "선별" if context.market.state == "변동성 확대장" else "관망"
-    lines.append(f"신규매수: {bold(can_buy)}")
-    wait_policy = "필수" if context.market.state in {"하락장", "횡보장"} else "부분 관망"
-    lines.append(f"관망 여부: {bold(wait_policy)}")
-    lines.append(f"추격매수 금지: {bold('예')}")
-    lines.append(f"현금 비중 전략: {bold(context.market.cash_recommendation)}")
+    watchlist = analyze_watchlist(context)
+    holding_analyses = analyze_holdings(context)
+    recommendations = select_top_recommendations(watchlist, context.holdings)
+    matches = match_portfolio_with_strong_themes(
+        context.holdings,
+        context.watchlist_items,
+        context.strong_themes,
+        context.theme_config,
+    )
+    lines.append("오늘 강한테마 TOP3:")
+    for index, theme in enumerate(context.strong_themes[:3], start=1):
+        lines.append(f"{index}. {bold(theme)}")
+    if not context.strong_themes:
+        lines.append("강한테마 데이터 없음")
+    lines.append("")
+    lines.append("보유종목 연결:")
+    if matches["matched_holdings"]:
+        for row in matches["matched_holdings"][:5]:
+            item = row["item"]
+            match = row["match"]
+            analysis = holding_analyses.get(str(item.get("ticker", "")))
+            profit_pct = None
+            if analysis and analysis.current_price:
+                average_price = holding_average_price(item)
+                profit_pct = ((analysis.current_price / average_price) - 1) * 100 if average_price else None
+            lines.append(f"* {item.get('name', '-')}: {match['matched_theme']} {match['match_strength']} / 수익률 {format_pct(profit_pct)}")
+    else:
+        lines.append("* 오늘 강한테마와 직접 연결된 보유종목 없음")
+    lines.append("")
+    lines.append("관심종목 중 오늘 볼 종목:")
+    watch_by_ticker = {normalize_text(item.ticker): item for item in watchlist}
+    matched_watch = []
+    for row in matches["matched_watchlist"]:
+        ticker_key = normalize_text(str(row["item"].get("ticker", "")))
+        analysis = watch_by_ticker.get(ticker_key)
+        if analysis and not analysis.error:
+            matched_watch.append((analysis, row["match"]))
+    if matched_watch:
+        for analysis, match in sorted(matched_watch, key=lambda pair: (pair[1]["strength_score"], pair[0].composite_score), reverse=True)[:5]:
+            lines.append(f"* {analysis.name}: {match['matched_theme']} {match['match_strength']} / {analysis.final_action} - {action_reason_for_stock(analysis, match, True)}")
+    else:
+        lines.append("* 강한테마 매칭 관심종목 없음")
+    lines.append("")
+    lines.append("신규 후보 TOP3:")
+    if recommendations:
+        for item in recommendations[:3]:
+            match = theme_match_detail(item, context.strong_themes, context.theme_config)
+            match_text = f"{match['matched_theme']} {match['match_strength']}" if match["match_strength"] != "없음" else "없음"
+            lines.append(f"* {item.name}: {match_text} / {item.final_action} - {action_reason_for_stock(item, match)}")
+    else:
+        lines.append("* 추천 가능 종목 없음")
+    lines.append("")
+    lines.append("리스크/주의사항:")
+    lines.append(f"* 시장 상태: {bold(context.market.state)}")
+    lines.append(f"* 현금 비중 전략: {bold(context.market.cash_recommendation)}")
+    lines.append("* 강한테마 밖 종목은 신규매수보다 관찰 우선")
     return "\n".join(lines).strip()
 
 

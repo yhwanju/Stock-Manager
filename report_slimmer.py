@@ -78,32 +78,6 @@ def _holding_keys() -> set[str]:
     return keys
 
 
-def _candidate_keys(name: str) -> set[str]:
-    normalized_name = analyzer.normalize_text(name)
-    keys = {normalized_name} if normalized_name else set()
-    for loader in (storage.load_watchlist, storage.load_holdings):
-        try:
-            items = loader()
-        except Exception:
-            items = []
-        for item in items:
-            item_name = analyzer.normalize_text(str(item.get("name", "")))
-            item_ticker = analyzer.normalize_text(str(item.get("ticker", "")))
-            if normalized_name and normalized_name in {item_name, item_ticker}:
-                if item_name:
-                    keys.add(item_name)
-                if item_ticker:
-                    keys.add(item_ticker)
-    try:
-        ticker_map = storage.load_ticker_map()
-    except Exception:
-        ticker_map = {}
-    for map_name, ticker in ticker_map.items():
-        if analyzer.normalize_text(str(map_name)) == normalized_name:
-            keys.add(analyzer.normalize_text(str(ticker)))
-    return keys
-
-
 def _split_stock_blocks(section_text: str) -> list[str]:
     blocks: list[str] = []
     current: list[str] = []
@@ -128,7 +102,7 @@ def _recommendation_blocks(original_report: str) -> list[str]:
     result: list[str] = []
     for block in _split_stock_blocks(text):
         name = _plain(_line_after(block, "종목명:"))
-        if _candidate_keys(name) & held:
+        if analyzer.normalize_text(name) in held:
             continue
         action = _plain(_line_after(block, "액션:"))
         entry = _plain(_line_after(block, "진입 가능 구간:"))
@@ -231,5 +205,7 @@ def _slim_holdings_report(original_report: str) -> str:
 def build_daily_reports(logger: Logger = None, record_recommendations: bool = True) -> list[str]:
     reports = analyzer.build_daily_reports(logger=logger, record_recommendations=record_recommendations)
     if len(reports) != 2:
+        return reports
+    if "**1) 오늘 강한테마 TOP3**" in reports[0] or "**💼 보유종목 요약**" in reports[1]:
         return reports
     return [_slim_market_report(reports[0]), _slim_holdings_report(reports[1])]
