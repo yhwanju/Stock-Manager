@@ -214,11 +214,7 @@ def watchlist_text() -> str:
 
 def holdings_text(items: list[dict[str, Any]] | None = None, logger: Logger = None) -> str:
     if items is None:
-        storage.prune_watchlist_holdings_overlap(logger=logger)
         items = storage.load_holdings(logger=logger)
-    context = analyzer.build_context(logger=logger)
-    theme_config = context.theme_config
-    strong_themes = context.strong_themes
 
     analyzer.log(
         logger,
@@ -236,20 +232,14 @@ def holdings_text(items: list[dict[str, Any]] | None = None, logger: Logger = No
             ticker = str(item.get("ticker", ""))
             quantity = int(item.get("quantity", 0))
             average_price = analyzer.holding_average_price(item)
-            analysis = analyzer.analyze_stock(item, strong_themes, context.market.state)
+            analysis = analyzer.analyze_stock(item, [], "횡보장")
             current_price = analysis.current_price
             valuation_profit = None
             valuation_return_pct = None
             if current_price and average_price:
                 valuation_profit = (current_price - average_price) * quantity
                 valuation_return_pct = ((current_price / average_price) - 1) * 100
-            action, stop_price, _target_price = analyzer.holding_action(analysis, quantity, average_price, context.market.state)
-            match = analyzer.theme_match_detail(item, strong_themes, theme_config)
-            match_text = (
-                f"{match['matched_theme']} {match['match_strength']}"
-                if match["match_strength"] != "없음"
-                else "없음"
-            )
+            action, _stop_price, _target_price = analyzer.holding_action(analysis, quantity, average_price, "횡보장")
 
             lines.append(f"종목명: {analyzer.bold(display_stock_name(item))}")
             lines.append(f"보유수량: {analyzer.bold(f'{quantity:,}주')}")
@@ -262,15 +252,7 @@ def holdings_text(items: list[dict[str, Any]] | None = None, logger: Logger = No
             lines.append(f"평가손익: {analyzer.bold(valuation_text)}")
             realized_text = analyzer.format_signed_price_for_ticker(realized_totals.get(ticker, 0.0), ticker)
             lines.append(f"실현손익 누적: {analyzer.bold(realized_text)}")
-            lines.append(f"테마: {analyzer.bold(' / '.join(analyzer.stock_theme_labels(item, theme_config)) or '미분류')}")
             lines.append(f"액션: {analyzer.bold(action)}")
-            lines.append(f"오늘 강한테마 매칭: {analyzer.bold(match_text)}")
-            lines.append(f"판단 사유: {analyzer.holding_action_reason(action, analysis, valuation_return_pct, match, context.market.state)}")
-            lines.append(f"관찰 가격: {analyzer.bold(analyzer.format_price_for_ticker(current_price, ticker))}")
-            lines.append(f"관찰 포인트: {analyzer.holding_observation_points(analysis, match)}")
-            lines.append(f"리스크: {analyzer.holding_risk_text(analysis, context.market.state, match)}")
-            if stop_price:
-                lines.append(f"액션 이유: {analyzer.format_price_for_ticker(stop_price, ticker)} 이탈 여부와 테마 지속성을 함께 확인합니다.")
             if analysis.error:
                 lines.append(f"시세 오류: {analysis.error}")
             lines.append("")

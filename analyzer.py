@@ -2040,6 +2040,12 @@ def holdings_text(items: list[dict[str, Any]] | None = None, logger: Logger = No
 def portfolio_check_report() -> str:
     context = build_context()
     holding_analyses = analyze_holdings(context)
+    theme_matches = match_portfolio_with_strong_themes(
+        context.holdings,
+        context.watchlist_items,
+        context.strong_themes,
+        context.theme_config,
+    )
     realized_totals = realized_profit_map(storage.load_trade_history())
     total_value = 0.0
     rows: list[tuple[dict[str, Any], StockAnalysis, float, float | None, float | None, float]] = []
@@ -2098,7 +2104,27 @@ def portfolio_check_report() -> str:
         weight_text = f"{weight:.1f}%"
         lines.append(f"비중: {bold(weight_text)}")
         lines.append(f"액션: {bold(action)}")
+        match = theme_match_detail(holding, context.strong_themes, context.theme_config)
+        match_text = (
+            f"{match['matched_theme']} {match['match_strength']}"
+            if match["match_strength"] != "없음"
+            else "없음"
+        )
+        lines.append(f"오늘 강한테마 매칭: {bold(match_text)}")
+        lines.append(f"매칭 강도: {bold(match['match_strength'])}")
+        lines.append(f"판단 사유: {holding_action_reason(action, analysis, profit_pct, match, context.market.state)}")
+        lines.append(f"관찰 포인트: {holding_observation_points(analysis, match)}")
+        lines.append(f"리스크: {holding_risk_text(analysis, context.market.state, match)}")
         lines.append("")
+
+    lines.append("테마 노출 요약:")
+    if theme_matches["top_theme_exposure"]:
+        for exposure in theme_matches["top_theme_exposure"][:5]:
+            names = ", ".join(exposure.get("holdings", [])[:3])
+            lines.append(f"* {exposure['theme']}: {exposure['count']}개 ({names})")
+    else:
+        lines.append("* 오늘 강한테마 TOP3와 직접 연결된 보유종목 없음")
+    lines.append("")
 
     lines.append("테마별 비중:")
     if theme_values and total_value:
