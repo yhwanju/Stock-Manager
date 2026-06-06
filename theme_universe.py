@@ -12,6 +12,7 @@ import storage
 THEME_UNIVERSE_FILE = "theme_universe.json"
 DEFAULT_RECOMMENDATION_CANDIDATE_LIMIT = 100
 MAX_RECOMMENDATION_CANDIDATE_LIMIT = 120
+DEPRECATED_TICKERS = {"091990.KQ"}
 
 Logger = Callable[[str], None] | None
 
@@ -108,6 +109,11 @@ def _emit_log(logger: Logger, message: str) -> None:
         print(message, flush=True)
 
 
+def is_deprecated_ticker(ticker: Any) -> bool:
+    normalized = analyzer.normalize_ticker_symbol(str(ticker or ""))
+    return normalized in DEPRECATED_TICKERS
+
+
 def recommendation_candidate_limit(theme_config: dict[str, Any] | None = None, default: int = DEFAULT_RECOMMENDATION_CANDIDATE_LIMIT) -> int:
     config = theme_config or {}
     try:
@@ -138,7 +144,11 @@ def load_theme_universe(logger: Logger = None) -> dict[str, list[str]]:
     for theme, tickers in payload.items():
         if not isinstance(tickers, list):
             continue
-        cleaned = [analyzer.normalize_ticker_symbol(str(ticker)) for ticker in tickers if str(ticker).strip()]
+        cleaned = [
+            analyzer.normalize_ticker_symbol(str(ticker))
+            for ticker in tickers
+            if str(ticker).strip() and not is_deprecated_ticker(ticker)
+        ]
         if cleaned:
             universe[str(theme)] = cleaned
     return universe
@@ -152,7 +162,7 @@ def load_theme_universe_rows(logger: Logger = None) -> list[dict[str, Any]]:
         if str(row.get("status", "active")).strip().lower() != "active":
             continue
         ticker = analyzer.normalize_ticker_symbol(str(row.get("ticker", "")))
-        if not ticker:
+        if not ticker or is_deprecated_ticker(ticker):
             continue
         item = dict(row)
         item["ticker"] = ticker
@@ -243,6 +253,8 @@ def group_theme_universe_by_theme(rows: list[dict[str, Any]] | None = None, logg
     seen: dict[str, set[str]] = defaultdict(set)
     source_rows = rows if rows is not None else load_theme_universe_rows(logger=logger)
     for row in source_rows:
+        if is_deprecated_ticker(row.get("ticker")):
+            continue
         major_themes, explanatory_subthemes = _major_themes_and_subthemes(row)
         for theme in major_themes:
             ticker_key = analyzer.normalize_text(str(row.get("ticker", "")))
@@ -375,14 +387,20 @@ def _score_subtheme_groups(
             for row in rows
         ]
         valid = [item for item in valid if item is not None and not getattr(item, "error", None)]
+        valid_tickers = {analyzer.normalize_text(str(item.ticker)) for item in valid}
+        valid_rows = [
+            row
+            for row in rows
+            if analyzer.normalize_text(str(row.get("ticker", ""))) in valid_tickers
+        ]
         change_values = [float(item.change_pct) for item in valid if item.change_pct is not None]
         volume_values = [float(item.metrics.get("volume_ratio", 0.0) or 0.0) for item in valid if item.metrics]
         avg_return = _avg(change_values) if change_values else None
         avg_volume_ratio = _avg(volume_values) if volume_values else None
-        representative_score = 10 if any(_is_representative(row) for row in rows) else 0
-        direct_score = 10 if any(_is_direct_benefit(row) for row in rows) else 0
-        priority_score = analyzer.clamp(max((_priority_weight(row.get("priority")) for row in rows), default=0) * 2, 0, 10)
-        breadth_score = analyzer.clamp(len(rows), 0, 5)
+        representative_score = 10 if any(_is_representative(row) for row in valid_rows) else 0
+        direct_score = 10 if any(_is_direct_benefit(row) for row in valid_rows) else 0
+        priority_score = analyzer.clamp(max((_priority_weight(row.get("priority")) for row in valid_rows), default=0) * 2, 0, 10)
+        breadth_score = analyzer.clamp(len(valid_rows), 0, 5)
         score = analyzer.clamp(
             _score_subtheme_return(avg_return)
             + _score_subtheme_volume(avg_volume_ratio)
@@ -404,11 +422,11 @@ def _score_subtheme_groups(
             {
                 "subtheme": subtheme,
                 "score": score,
-                "rows": rows,
+                "rows": valid_rows,
                 "leaders": leaders,
                 "avg_return": avg_return,
                 "avg_volume_ratio": avg_volume_ratio,
-                "total_count": len(rows),
+                "total_count": len(valid_rows),
                 "data_points": len(valid),
             }
         )
@@ -437,12 +455,18 @@ def score_theme_groups(context: Any, rows: list[dict[str, Any]] | None = None, l
             if str(getattr(item, "ticker", "")).strip()
         }
         valid = [item for item in analyses if not getattr(item, "error", None)]
+        valid_tickers = {analyzer.normalize_text(str(item.ticker)) for item in valid}
+        valid_rows = [
+            row
+            for row in theme_rows
+            if analyzer.normalize_text(str(row.get("ticker", ""))) in valid_tickers
+        ]
         change_values = [float(item.change_pct) for item in valid if item.change_pct is not None]
         volume_values = [float(item.metrics.get("volume_ratio", 0.0) or 0.0) for item in valid if item.metrics]
         avg_return = _avg(change_values) if change_values else None
         avg_volume_ratio = _avg(volume_values) if volume_values else None
 
-        representative_rows = [row for row in theme_rows if _is_representative(row)]
+        representative_rows = [row for row in valid_rows if _is_representative(row)]
         representative_tickers = {analyzer.normalize_text(str(row.get("ticker", ""))) for row in representative_rows}
         representative_valid = [
             item for item in valid
@@ -455,9 +479,13 @@ def score_theme_groups(context: Any, rows: list[dict[str, Any]] | None = None, l
         ]) if representative_valid else None
         representative_score = analyzer.clamp(((representative_change or 0.0) + 2.0) / 7.0 * 10, 0, 10) if representative_valid else 0
 
-        direct_ratio = sum(1 for row in theme_rows if _is_direct_benefit(row)) / len(theme_rows)
+        direct_ratio = (
+            sum(1 for row in valid_rows if _is_direct_benefit(row)) / len(valid_rows)
+            if valid_rows
+            else 0.0
+        )
         direct_score = analyzer.clamp(direct_ratio * 10, 0, 10)
-        avg_priority = _avg([_priority_weight(row.get("priority")) for row in theme_rows])
+        avg_priority = _avg([_priority_weight(row.get("priority")) for row in valid_rows])
         priority_score = analyzer.clamp(avg_priority, 0, 5)
         mention_score = int(news_scores.get(theme, 0))
         return_score = _score_return_component(avg_return)
@@ -475,8 +503,6 @@ def score_theme_groups(context: Any, rows: list[dict[str, Any]] | None = None, l
             ),
             reverse=True,
         )[:3]
-        if not leaders:
-            leaders = sorted(analyses, key=lambda item: item.composite_score, reverse=True)[:3]
 
         evidence: list[str] = []
         if avg_return is not None:
@@ -500,8 +526,8 @@ def score_theme_groups(context: Any, rows: list[dict[str, Any]] | None = None, l
             {
                 "theme": theme,
                 "score": total_score,
-                "market_mix": _market_mix(theme_rows),
-                "rows": theme_rows,
+                "market_mix": _market_mix(valid_rows),
+                "rows": valid_rows,
                 "leaders": leaders,
                 "subthemes": _score_subtheme_groups(theme_rows, analyses_by_ticker),
                 "evidence": evidence,
@@ -516,7 +542,7 @@ def score_theme_groups(context: Any, rows: list[dict[str, Any]] | None = None, l
                 "avg_return": avg_return,
                 "avg_volume_ratio": avg_volume_ratio,
                 "data_points": len(valid),
-                "total_count": len(theme_rows),
+                "total_count": len(valid_rows),
             }
         )
 
@@ -597,6 +623,8 @@ def review_theme_output_before_send(payload: dict[str, Any]) -> tuple[dict[str, 
 def _stock_meta_by_ticker(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     meta: dict[str, dict[str, Any]] = {}
     for row in rows:
+        if is_deprecated_ticker(row.get("ticker")):
+            continue
         key = analyzer.normalize_text(str(row.get("ticker", "")))
         if not key:
             continue
@@ -856,7 +884,7 @@ def theme_universe_candidate_items(strong_themes: list[str], theme_config: dict[
             ticker = str(row.get("ticker", ""))
             normalized_ticker = analyzer.normalize_ticker_symbol(str(ticker))
             key = analyzer.normalize_text(normalized_ticker)
-            if not normalized_ticker or key in seen:
+            if not normalized_ticker or is_deprecated_ticker(normalized_ticker) or key in seen:
                 continue
             candidates.append(_theme_universe_stock_item(normalized_ticker, universe_theme, theme_map, ticker_map, row=row))
             seen.add(key)

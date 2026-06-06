@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import math
+import contextlib
+import io
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
@@ -24,6 +27,12 @@ from config import (
 
 Logger = Callable[[str], None] | None
 KRX_LISTING_CACHE: pd.DataFrame | None = None
+YFINANCE_LOGGER_NAMES = ("yfinance", "yfinance.base", "yfinance.scrapers.history", "yfinance.multi")
+_PRICE_SKIP_LOGGED: set[str] = set()
+
+
+class PriceDataUnavailable(RuntimeError):
+    """Raised when Yahoo has no usable OHLCV data for a ticker."""
 
 
 @dataclass
@@ -101,6 +110,37 @@ class TickerResolution:
 def log(logger: Logger, message: str) -> None:
     if logger:
         logger(message)
+
+
+@contextlib.contextmanager
+def quiet_yfinance_output():
+    previous_states = []
+    for logger_name in YFINANCE_LOGGER_NAMES:
+        yf_logger = logging.getLogger(logger_name)
+        previous_states.append((yf_logger, yf_logger.level, yf_logger.propagate))
+        yf_logger.setLevel(logging.CRITICAL + 1)
+        yf_logger.propagate = False
+    sink = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            yield
+    finally:
+        for yf_logger, level, propagate in previous_states:
+            yf_logger.setLevel(level)
+            yf_logger.propagate = propagate
+
+
+def price_data_unavailable_message() -> str:
+    return "시세 데이터 없음"
+
+
+def log_price_skip_once(ticker: str, reason: str | None = None) -> None:
+    normalized = normalize_ticker_symbol(str(ticker or ""))
+    key = normalize_text(normalized)
+    if not key or key in _PRICE_SKIP_LOGGED:
+        return
+    _PRICE_SKIP_LOGGED.add(key)
+    print(f"[price-skip] {normalized}: {reason or price_data_unavailable_message()}")
 
 
 def clamp(value: float, minimum: int = 0, maximum: int = 100) -> int:
@@ -471,7 +511,8 @@ def looks_like_us_ticker(value: str) -> bool:
 
 def yfinance_has_data(ticker: str) -> bool:
     try:
-        history = yf.Ticker(ticker).history(period="5d", interval="1d", auto_adjust=False)
+        with quiet_yfinance_output():
+            history = yf.Ticker(ticker).history(period="5d", interval="1d", auto_adjust=False)
         return not history.empty and "Close" in history.columns
     except Exception:
         return False
@@ -600,7 +641,8 @@ def resolve_ticker_from_map(query: str, ticker_map: dict[str, str]) -> str | Non
     return None
 
 
-def fetch_history(ticker: str) -> pd.DataFrame:
+def _fetch_history_legacy(ticker: str) -> pd.DataFrame:
+    return fetch_history(ticker)
     data = yf.Ticker(ticker).history(
         period=HISTORY_PERIOD,
         interval=HISTORY_INTERVAL,
@@ -611,6 +653,27 @@ def fetch_history(ticker: str) -> pd.DataFrame:
     if "Close" not in data.columns:
         raise ValueError("종가 컬럼을 찾지 못했습니다.")
     return data.dropna(subset=["Close"])
+
+
+def fetch_history(ticker: str) -> pd.DataFrame:
+    normalized_ticker = normalize_ticker_symbol(str(ticker))
+    try:
+        with quiet_yfinance_output():
+            data = yf.Ticker(normalized_ticker).history(
+                period=HISTORY_PERIOD,
+                interval=HISTORY_INTERVAL,
+                auto_adjust=False,
+            )
+    except Exception as exc:
+        raise PriceDataUnavailable(price_data_unavailable_message()) from exc
+
+    if data.empty or "Close" not in data.columns:
+        raise PriceDataUnavailable(price_data_unavailable_message())
+
+    cleaned = data.dropna(subset=["Close"])
+    if cleaned.empty:
+        raise PriceDataUnavailable(price_data_unavailable_message())
+    return cleaned
 
 
 def latest_float(series: pd.Series, default: float | None = None) -> float | None:
@@ -1027,6 +1090,14 @@ def analyze_stock(stock: dict[str, Any], strong_themes: list[str], market_state:
         analysis.reason_bullets = build_reason_bullets(analysis, ma20, ma60, rsi, volume_ratio, theme_bonus)
         analysis.risk_bullets = build_risk_bullets(analysis, market_state)
         analysis.reason = " / ".join(analysis.reason_bullets)
+        return analysis
+    except PriceDataUnavailable:
+        analysis.error = price_data_unavailable_message()
+        analysis.reason = price_data_unavailable_message()
+        analysis.reason_bullets = [price_data_unavailable_message()]
+        analysis.risk_bullets = [price_data_unavailable_message()]
+        analysis.final_action = "?곗씠???ㅻ쪟"
+        log_price_skip_once(ticker, analysis.error)
         return analysis
     except Exception as exc:
         analysis.error = str(exc)
