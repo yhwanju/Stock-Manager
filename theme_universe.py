@@ -940,6 +940,8 @@ def build_context_with_theme_universe(*args: Any, **kwargs: Any) -> Any:
 def select_top_recommendations_with_theme_universe(
     watchlist: list[Any],
     holdings: list[dict[str, Any]] | None = None,
+    strong_themes: list[str] | None = None,
+    theme_config: dict[str, Any] | None = None,
 ) -> list[Any]:
     candidates = _LAST_RECOMMENDATION_CANDIDATES or watchlist
     held_tickers = _holding_tickers(holdings or [])
@@ -954,7 +956,7 @@ def select_top_recommendations_with_theme_universe(
         matched_theme = _best_theme_for_stock(
             {"themes": item.themes, "subthemes": item.subthemes},
             _LAST_RECOMMENDATION_THEME_SCORES,
-            storage.load_theme_config(),
+            theme_config or storage.load_theme_config(),
         )
         if not matched_theme:
             continue
@@ -978,7 +980,7 @@ def select_top_recommendations_with_theme_universe(
         ranked.append((score, item))
     if ranked:
         return [item for _, item in sorted(ranked, key=lambda pair: (pair[0], pair[1].composite_score), reverse=True)[:3]]
-    return _ORIGINAL_SELECT_TOP(candidates, holdings) if _ORIGINAL_SELECT_TOP else []
+    return _ORIGINAL_SELECT_TOP(candidates, holdings, strong_themes, theme_config) if _ORIGINAL_SELECT_TOP else []
 
 
 def build_deep_analysis_candidates(max_count: int | None = None) -> list[dict[str, Any]]:

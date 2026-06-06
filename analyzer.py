@@ -1487,7 +1487,7 @@ def build_daily_report_messages(
     ]
     theme_matches = match_portfolio_with_strong_themes(holdings, raw_watchlist, strong_themes, theme_config)
     if recommendations is None:
-        recommendations = select_top_recommendations(watchlist, holdings)
+        recommendations = select_top_recommendations(watchlist, holdings, strong_themes, theme_config)
 
     watchlist_by_ticker = {normalize_text(item.ticker): item for item in watchlist}
     watchlist_raw_by_ticker = {
@@ -1657,17 +1657,54 @@ def infer_stock_market(ticker: str) -> str:
 def select_top_recommendations(
     watchlist: list[StockAnalysis],
     holdings: list[dict[str, Any]] | None = None,
+    strong_themes: list[str] | None = None,
+    theme_config: dict[str, Any] | None = None,
 ) -> list[StockAnalysis]:
     held_tickers = holding_ticker_keys(holdings or [])
+    config = theme_config or storage.load_theme_config()
+    watchlist_tickers = {normalize_text(item.ticker) for item in watchlist}
     recommendation_pool = [
         item for item in watchlist
         if not item.error and storage.normalize(item.ticker) not in held_tickers
     ]
-    return sorted(
-        recommendation_pool,
-        key=lambda item: (item.composite_score, item.timing_score, item.quant_score),
-        reverse=True,
-    )[:3]
+    strong_theme_pool: list[tuple[int, StockAnalysis]] = []
+    fallback_pool: list[tuple[int, StockAnalysis]] = []
+    priority_order = {
+        normalize_text(theme): index
+        for index, theme in enumerate(priority_theme_names(config))
+    }
+    for item in recommendation_pool:
+        match = theme_match_detail(item, strong_themes or [], config)
+        matched = match["match_strength"] != "없음"
+        item_priority = min(
+            (
+                priority_order.get(normalize_text(canonical_theme(theme, config)), 999)
+                for theme in item.themes
+            ),
+            default=999,
+        )
+        priority_score = max(0, 30 - item_priority) if item_priority != 999 else 0
+        match_score = int(match.get("strength_score", 0) or 0)
+        watchlist_score = 12 if normalize_text(item.ticker) in watchlist_tickers else 0
+        total = (
+            match_score * 3
+            + priority_score
+            + watchlist_score
+            + item.composite_score
+            + int(item.metrics.get("phase3_recommendation_score", 0) or 0)
+        )
+        target_pool = strong_theme_pool if matched else fallback_pool
+        target_pool.append((total, item))
+
+    ranked = strong_theme_pool if strong_theme_pool else fallback_pool
+    return [
+        item
+        for _score, item in sorted(
+            ranked,
+            key=lambda pair: (pair[0], pair[1].timing_score, pair[1].quant_score),
+            reverse=True,
+        )[:3]
+    ]
 
 
 def record_recommendation_history(
@@ -1764,7 +1801,7 @@ def build_daily_reports(logger: Logger = None, record_recommendations: bool = Fa
     holding_analyses = analyze_holdings(context)
     holding_errors = [item for item in holding_analyses.values() if item.error]
     log(logger, f"보유종목 분석 완료: 성공 {len(holding_analyses) - len(holding_errors)}개, 오류 {len(holding_errors)}개")
-    recommendations = select_top_recommendations(watchlist, context.holdings)
+    recommendations = select_top_recommendations(watchlist, context.holdings, context.strong_themes, context.theme_config)
     reports = build_daily_report_messages(
         market=context.market,
         strong_themes=context.strong_themes,
@@ -2232,7 +2269,7 @@ def today_strategy_report() -> str:
     lines = section("⚡ 오늘전략")
     watchlist = analyze_watchlist(context)
     holding_analyses = analyze_holdings(context)
-    recommendations = select_top_recommendations(watchlist, context.holdings)
+    recommendations = select_top_recommendations(watchlist, context.holdings, context.strong_themes, context.theme_config)
     matches = match_portfolio_with_strong_themes(
         context.holdings,
         context.watchlist_items,
@@ -2261,17 +2298,57 @@ def today_strategy_report() -> str:
     lines.append("")
     lines.append("관심종목 중 오늘 볼 종목:")
     watch_by_ticker = {normalize_text(item.ticker): item for item in watchlist}
-    matched_watch = []
-    for row in matches["matched_watchlist"]:
-        ticker_key = normalize_text(str(row["item"].get("ticker", "")))
+    watch_rows: list[tuple[StockAnalysis, dict[str, Any]]] = []
+    for raw in context.watchlist_items:
+        ticker_key = normalize_text(str(raw.get("ticker", "")))
         analysis = watch_by_ticker.get(ticker_key)
-        if analysis and not analysis.error:
-            matched_watch.append((analysis, row["match"]))
+        if not analysis:
+            continue
+        watch_rows.append((analysis, theme_match_detail(raw, context.strong_themes, context.theme_config)))
+
+    matched_watch = [
+        (analysis, match)
+        for analysis, match in watch_rows
+        if not analysis.error and match["match_strength"] != "없음"
+    ]
+    pullback_watch = [
+        (analysis, match)
+        for analysis, match in watch_rows
+        if not analysis.error
+        and match["match_strength"] == "없음"
+        and (
+            analysis.final_action in {"눌림대기", "관망"}
+            or abs(float(analysis.metrics.get("price_vs_ma20", 99.0) or 99.0)) <= 5
+        )
+    ]
+    excluded_watch = [
+        (analysis, match)
+        for analysis, match in watch_rows
+        if (analysis, match) not in matched_watch and (analysis, match) not in pullback_watch
+    ]
+
+    lines.append("강한테마 매칭 종목:")
     if matched_watch:
         for analysis, match in sorted(matched_watch, key=lambda pair: (pair[1]["strength_score"], pair[0].composite_score), reverse=True)[:5]:
             lines.append(f"* {analysis.name}: {match['matched_theme']} {match['match_strength']} / {analysis.final_action} - {action_reason_for_stock(analysis, match, True)}")
     else:
-        lines.append("* 강한테마 매칭 관심종목 없음")
+        lines.append("* 없음")
+    lines.append("")
+    lines.append("눌림 대기 종목:")
+    if pullback_watch:
+        for analysis, match in sorted(pullback_watch, key=lambda pair: pair[0].timing_score, reverse=True)[:5]:
+            match_text = f"{match['matched_theme']} {match['match_strength']}" if match["match_strength"] != "없음" else "테마 매칭 없음"
+            lines.append(f"* {analysis.name}: {match_text} / {analysis.current_state} - 눌림 확인 후 접근")
+    else:
+        lines.append("* 없음")
+    lines.append("")
+    lines.append("제외 종목:")
+    if excluded_watch:
+        for analysis, match in excluded_watch[:5]:
+            reason = "시세 오류" if analysis.error else action_reason_for_stock(analysis, match, True)
+            lines.append(f"* {analysis.name}: {reason}")
+    else:
+        lines.append("* 없음")
     lines.append("")
     lines.append("신규 후보 TOP3:")
     if recommendations:
